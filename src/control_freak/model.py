@@ -205,8 +205,8 @@ def build_fixture_model() -> AppModel:
                 "Release channel, installed version, and a safe path back.",
                 [
                     SettingRow("installed-version", "Installed version", "The immutable application release currently active.", RowKind.READONLY, "0.1.0-dev"),
-                    SettingRow("release-channel", "Release channel", "Stable receives tested releases. Nightly receives the newest build and may contain incomplete behavior.", RowKind.CHOICE, "Stable", ("Stable", "Nightly")),
-                    SettingRow("check-updates", "Check for updates", "Look for a release without installing it.", RowKind.ACTION, "Check now"),
+                    SettingRow("install-stable", "Install stable update", "Use the newest staged stable release. Stable remains the default channel.", RowKind.ACTION, "Install", confirm="Install the staged stable release and use it on the next launch?"),
+                    SettingRow("install-nightly", "Install nightly update", "Opt in to the newest staged nightly build. Nightly may contain incomplete behavior.", RowKind.ACTION, "Install", confirm="Install the staged nightly release and switch this machine to the nightly channel?"),
                     SettingRow("rollback", "Roll back", "Restore the previously installed verified release.", RowKind.ACTION, "Unavailable", available=False, reason="No previous release is stored on this machine."),
                 ],
             ),

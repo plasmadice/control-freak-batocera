@@ -16,6 +16,29 @@ Control Freak is being rebuilt as a local Batocera application rather than a rem
 - fixture screens for overview, display/audio, network/web, updates, rollback, diagnostics, and system actions
 - deterministic screenshot rendering for visual review
 
+## Batocera installation
+
+The repository includes a manifest-driven installer. It registers Control Freak under Batocera's `pygame` system and keeps immutable releases below `/userdata/roms/pygame/control-freak/releases`, selected through an atomic `current.json` pointer.
+
+```bash
+python3 deploy/install_batocera.py \
+  --source . \
+  --release-id 0.1.0-dev-<revision> \
+  --channel stable
+```
+
+Reinstall the exact release after verifying the current managed files have not drifted:
+
+```bash
+python3 deploy/install_batocera.py \
+  --source . \
+  --release-id 0.1.0-dev-<revision> \
+  --channel stable \
+  --force
+```
+
+The Updates screen exposes separate stable and nightly actions. In this private prototype they select only operator-staged releases; network release discovery is intentionally not implemented yet.
+
 ## Run locally
 
 ```bash

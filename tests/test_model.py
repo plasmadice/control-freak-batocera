@@ -80,11 +80,20 @@ def test_back_cancels_confirmation_without_mutating() -> None:
     assert model.last_action is None
 
 
+def test_update_section_exposes_stable_and_nightly_actions() -> None:
+    model = build_fixture_model()
+
+    assert model.row("install-stable").kind is RowKind.ACTION
+    assert model.row("install-nightly").kind is RowKind.ACTION
+    assert model.row("install-stable").confirm.startswith("Install the staged stable")
+    assert model.row("install-nightly").confirm.startswith("Install the staged nightly")
+
+
 def test_choice_cycles_and_unavailable_rows_do_nothing() -> None:
     model = build_fixture_model()
-    model.select("release-channel")
+    model.select("audio-output")
     model.dispatch(Action.SELECT)
-    assert model.row("release-channel").value == "Nightly"
+    assert model.row("audio-output").value == "Analog"
 
     model.select("rollback")
     model.dispatch(Action.SELECT)
