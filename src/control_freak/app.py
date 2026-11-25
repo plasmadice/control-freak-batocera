@@ -11,24 +11,12 @@ import subprocess
 
 import pygame
 
-from .input import ControllerIdentity, EventRouter, load_controller_bindings
+from .input import EventRouter, configure_sdl_controllers
 from .model import build_fixture_model
 from .ui import HEIGHT, WIDTH, clear_font_cache, render
 
 
 ES_INPUT_CONFIG = Path("/userdata/system/configs/emulationstation/es_input.cfg")
-
-
-def _init_joysticks() -> list[ControllerIdentity]:
-    pygame.joystick.init()
-    controllers = []
-    for index in range(pygame.joystick.get_count()):
-        joystick = pygame.joystick.Joystick(index)
-        joystick.init()
-        controllers.append(
-            ControllerIdentity(joystick.get_instance_id(), joystick.get_name(), joystick.get_guid())
-        )
-    return controllers
 
 
 def save_screenshot(path: Path) -> None:
@@ -100,7 +88,8 @@ def _installed_version(path: Path = Path("/userdata/roms/pygame/control-freak/cu
 
 def run(windowed: bool = False) -> None:
     pygame.init()
-    router = EventRouter(load_controller_bindings(ES_INPUT_CONFIG, _init_joysticks()))
+    controller_handles, mapped_ids = configure_sdl_controllers(ES_INPUT_CONFIG)
+    router = EventRouter(mapped_ids, controller_handles)
     size, flags = _display_mode(windowed, pygame.display.get_desktop_sizes())
     screen = pygame.display.set_mode(size, flags)
     pygame.display.set_caption("Control Freak")
