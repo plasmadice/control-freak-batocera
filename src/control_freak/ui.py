@@ -43,6 +43,10 @@ def context_title_lines(text: str) -> list[str]:
     return wrap_text(text, font(21, True), 232)[:2]
 
 
+def context_value_lines(text: str) -> list[str]:
+    return wrap_text(text, font(19, True), 232)[:2]
+
+
 def label(surface: pygame.Surface, text: str, x: int, y: int, size: int, color: pygame.Color = TEXT, bold: bool = False) -> pygame.Rect:
     image = font(size, bold).render(text, True, color)
     return surface.blit(image, (x, y))
@@ -67,8 +71,12 @@ def _header(surface: pygame.Surface, model: AppModel) -> None:
     pygame.draw.line(surface, RULE, (875, 22), (875, 68), 1)
     label(surface, "MACHINE", 904, 19, 11, MUTED, True)
     label(surface, str(model.row("device").value).upper(), 904, 39, 20, TEXT, True)
-    pygame.draw.circle(surface, TEAL, (1174, 43), 6)
-    label(surface, "LOCAL", 1190, 34, 14, TEAL, True)
+    web_requested = bool(model.row("web-access").value)
+    web_running = web_requested and model.row("web-address").available
+    status = "WEB ON" if web_running else "WEB REQUEST" if web_requested else "LOCAL"
+    color = TEAL if web_running else AMBER
+    pygame.draw.circle(surface, color, (1138 if web_requested else 1168, 43), 6)
+    label(surface, status, 1150 if web_requested else 1180, 34, 14, color, True)
 
 
 def _sidebar(surface: pygame.Surface, model: AppModel) -> None:
@@ -98,7 +106,8 @@ def _content(surface: pygame.Surface, model: AppModel) -> None:
     label(surface, section.title, x, 139, 34, TEXT, True)
     label(surface, section.summary, x, 182, 16, MUTED)
 
-    rows_x, rows_y, rows_w, row_h = x, 224, 590, 94
+    rows_x, rows_y, rows_w = x, 224, 590
+    row_h = 78 if len(section.rows) > 4 else 94
     for index, row in enumerate(section.rows):
         y = rows_y + index * (row_h + 8)
         selected = model.rows_focused and index == model.row_index
@@ -110,11 +119,11 @@ def _content(surface: pygame.Surface, model: AppModel) -> None:
             pygame.draw.rect(surface, RED, (rows_x, y, 4, row_h), border_radius=2)
 
         row_color = TEXT if row.available else DIM
-        label(surface, row.label, rows_x + 20, y + 17, 19, row_color, True)
-        _value(surface, row, rows_x + rows_w - 20, y + 19)
+        label(surface, row.label, rows_x + 20, y + (11 if row_h == 78 else 17), 19, row_color, True)
+        _value(surface, row, rows_x + rows_w - 20, y + (13 if row_h == 78 else 19))
         description = row.reason if not row.available else row.description
         for line_index, line in enumerate(wrap_text(description, font(13), 390)[:2]):
-            label(surface, line, rows_x + 20, y + 50 + line_index * 17, 13, MUTED if row.available else DIM)
+            label(surface, line, rows_x + 20, y + (43 if row_h == 78 else 50) + line_index * 15, 13, MUTED if row.available else DIM)
 
     _context(surface, model, 972, 224, 276, 400)
 
@@ -151,10 +160,12 @@ def _context(surface: pygame.Surface, model: AppModel, x: int, y: int, w: int, h
     line_y += 16
     pygame.draw.line(surface, RULE, (x + 22, line_y), (x + w - 22, line_y), 1)
     line_y += 22
-    label(surface, "CURRENT", x + 22, line_y, 11, MUTED, True)
+    label(surface, row.field_label, x + 22, line_y, 11, MUTED, True)
     line_y += 23
-    value = "ON" if row.kind is RowKind.TOGGLE and row.value else "OFF" if row.kind is RowKind.TOGGLE else str(row.value)
-    label(surface, value.upper(), x + 22, line_y, 19, TEXT if row.available else DIM, True)
+    value = row.field_value or ("ON" if row.kind is RowKind.TOGGLE and row.value else "OFF" if row.kind is RowKind.TOGGLE else str(row.value))
+    for value_line in context_value_lines(value.upper()):
+        label(surface, value_line, x + 22, line_y, 19, TEXT if row.available else DIM, True)
+        line_y += 23
 
     if not row.available:
         line_y += 48

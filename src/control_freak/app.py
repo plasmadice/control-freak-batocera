@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
+import json
 import os
 from pathlib import Path
+import shutil
 import socket
+import subprocess
 
 import pygame
 
-from .input import ControllerIdentity, actions_for_event, load_controller_bindings
+from .input import ControllerIdentity, EventRouter, load_controller_bindings
 from .model import build_fixture_model
 from .ui import HEIGHT, WIDTH, clear_font_cache, render
 
@@ -56,22 +60,68 @@ def _local_ipv4(socket_factory=socket.socket) -> str:
         return "Offline"
 
 
+def _connection_type(route_text: str | None = None, interfaces: Path = Path("/sys/class/net")) -> str:
+    if route_text is None:
+        try:
+            route_text = Path("/proc/net/route").read_text()
+        except OSError:
+            return "Network"
+    for line in route_text.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) > 1 and fields[1] == "00000000" and fields[0] != "lo":
+            return "Wireless" if (interfaces / fields[0] / "wireless").is_dir() else "Ethernet"
+    return "Network"
+
+
+def _tailscale_ipv4() -> str | None:
+    command = shutil.which("tailscale")
+    if command is None:
+        return None
+    try:
+        result = subprocess.run([command, "ip", "-4"], capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    candidate = next((line.strip() for line in result.stdout.splitlines() if line.strip()), "")
+    try:
+        return str(ipaddress.IPv4Address(candidate))
+    except ipaddress.AddressValueError:
+        return None
+
+
+def _installed_version(path: Path = Path("/userdata/roms/pygame/control-freak/current.json")) -> str:
+    try:
+        value = json.loads(path.read_text()).get("release_id")
+    except (OSError, json.JSONDecodeError):
+        return "Unknown"
+    return value if isinstance(value, str) else "Unknown"
+
+
 def run(windowed: bool = False) -> None:
     pygame.init()
-    controller_bindings = load_controller_bindings(ES_INPUT_CONFIG, _init_joysticks())
+    router = EventRouter(load_controller_bindings(ES_INPUT_CONFIG, _init_joysticks()))
     size, flags = _display_mode(windowed, pygame.display.get_desktop_sizes())
     screen = pygame.display.set_mode(size, flags)
     pygame.display.set_caption("Control Freak")
     canvas = pygame.Surface((WIDTH, HEIGHT))
     clock = pygame.time.Clock()
-    model = build_fixture_model(socket.gethostname().upper(), _local_ipv4())
+    ip_address = _local_ipv4()
+    model = build_fixture_model(
+        socket.gethostname().upper(),
+        ip_address,
+        _connection_type(),
+        tailscale_address=_tailscale_ipv4(),
+        installed_version=_installed_version(),
+    )
 
     while model.running:
-        for event in pygame.event.get():
+        events = pygame.event.get()
+        for event in events:
             if event.type == pygame.QUIT:
                 model.running = False
-            for action in actions_for_event(event, controller_bindings):
-                model.dispatch(action)
+        for action in router.actions(events):
+            model.dispatch(action)
 
         render(canvas, model)
         destination = screen.get_rect()

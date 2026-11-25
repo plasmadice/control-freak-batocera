@@ -33,6 +33,8 @@ class SettingRow:
     reason: str = ""
     level: str = "normal"
     confirm: str = ""
+    field_label: str = "CURRENT"
+    field_value: str | None = None
 
 
 @dataclass
@@ -59,6 +61,9 @@ class AppModel:
     pending_confirmation: Confirmation | None = None
     last_action: str | None = None
     running: bool = True
+    web_address: str = ""
+    web_runtime_available: bool = False
+    tailscale_address: str | None = None
 
     @property
     def current_section(self) -> Section:
@@ -141,14 +146,30 @@ class AppModel:
             if row.id == "web-access":
                 enabled = bool(row.value)
                 address = self.row("web-address")
-                address.available = enabled
-                address.value = "Starting…" if enabled else "Not running"
-                address.reason = "" if enabled else "Enable Web access first."
+                address.available = enabled and self.web_runtime_available
+                address.value = self.web_address if address.available else "Unavailable" if enabled else "Not running"
+                address.reason = "" if address.available else "Web service is not available in this build." if enabled else "Enable Web access first."
                 tailscale = self.row("tailscale")
-                tailscale.available = enabled
-                tailscale.reason = "" if enabled else "Web access must be enabled first."
+                tailscale.available = enabled and self.web_runtime_available and self.tailscale_address is not None
+                tailscale.reason = (
+                    "" if tailscale.available
+                    else "Web service is not available in this build."
+                    if enabled and not self.web_runtime_available
+                    else "Tailscale is not installed or connected on this machine."
+                    if self.tailscale_address is None
+                    else "Web access must be enabled first."
+                )
                 if not enabled:
                     tailscale.value = False
+                tailscale_address = self.row("tailscale-address")
+                tailscale_address.available = False
+                tailscale_address.value = "Hidden"
+                tailscale_address.reason = "Enable Tailscale access to show this address."
+            elif row.id == "tailscale":
+                address = self.row("tailscale-address")
+                address.available = bool(row.value)
+                address.value = f"http://{self.tailscale_address}:8787" if row.value else "Hidden"
+                address.reason = "" if row.value else "Enable Tailscale access to show this address."
         elif row.kind is RowKind.CHOICE and row.choices:
             index = row.choices.index(str(row.value))
             row.value = row.choices[(index + 1) % len(row.choices)]
@@ -156,7 +177,17 @@ class AppModel:
             self.last_action = row.id
 
 
-def build_fixture_model(device_name: str = "BATMINI", ip_address: str = "192.168.1.87") -> AppModel:
+def build_fixture_model(
+    device_name: str = "BATMINI",
+    ip_address: str = "192.168.1.87",
+    connection_type: str = "Ethernet",
+    tailscale_installed: bool = False,
+    tailscale_address: str | None = None,
+    web_runtime_available: bool = False,
+    installed_version: str = "0.1.0-dev",
+) -> AppModel:
+    if tailscale_installed and tailscale_address is None:
+        tailscale_address = "100.64.0.10"
     return AppModel(
         sections=[
             Section(
@@ -186,7 +217,7 @@ def build_fixture_model(device_name: str = "BATMINI", ip_address: str = "192.168
                 "Network & Web",
                 "Local connectivity and optional browser access to this machine.",
                 [
-                    SettingRow("network-status", "Network", "Current local connection and address.", RowKind.READONLY, ip_address, level="good"),
+                    SettingRow("network-status", "Network", "Current local connection and address.", RowKind.READONLY, f"{connection_type} · {ip_address}" if ip_address != "Offline" else "Offline", level="good"),
                     SettingRow(
                         "web-access",
                         "Web access",
@@ -196,7 +227,8 @@ def build_fixture_model(device_name: str = "BATMINI", ip_address: str = "192.168
                         confirm="Enable authenticated web access on the local network? You can turn it off here at any time.",
                     ),
                     SettingRow("web-address", "Web address", "Shown after web access starts successfully.", RowKind.READONLY, "Not running", available=False, reason="Enable Web access first."),
-                    SettingRow("tailscale", "Tailscale access", "Allow the web interface on the existing tailnet without making it public.", RowKind.TOGGLE, False, available=False, reason="Web access must be enabled first."),
+                    SettingRow("tailscale", "Tailscale access", "Allow the web interface on the existing tailnet without making it public.", RowKind.TOGGLE, False, available=False, reason="Tailscale is not installed or connected on this machine." if tailscale_address is None else "Web access must be enabled first."),
+                    SettingRow("tailscale-address", "Tailscale address", "Shown only while Tailscale access is enabled.", RowKind.READONLY, "Hidden", available=False, reason="Enable Tailscale access to show this address."),
                 ],
             ),
             Section(
@@ -204,9 +236,10 @@ def build_fixture_model(device_name: str = "BATMINI", ip_address: str = "192.168
                 "Updates",
                 "Release channel, installed version, and a safe path back.",
                 [
-                    SettingRow("installed-version", "Installed version", "The immutable application release currently active.", RowKind.READONLY, "0.1.0-dev"),
-                    SettingRow("install-stable", "Install stable update", "Use the newest staged stable release. Stable remains the default channel.", RowKind.ACTION, "Install", confirm="Install the staged stable release and use it on the next launch?"),
-                    SettingRow("install-nightly", "Install nightly update", "Opt in to the newest staged nightly build. Nightly may contain incomplete behavior.", RowKind.ACTION, "Install", confirm="Install the staged nightly release and switch this machine to the nightly channel?"),
+                    SettingRow("installed-version", "Installed version", "The immutable application release currently active.", RowKind.READONLY, installed_version),
+                    SettingRow("update-status", "Update status", "No release feed is configured in this build.", RowKind.READONLY, "Not checked"),
+                    SettingRow("install-stable", "Install stable update", "Install the newest operator-staged stable release. Stable remains the default channel.", RowKind.ACTION, "Staged release", confirm="Install the staged stable release and use it on the next launch?", field_label="RELEASE ACTION", field_value="INSTALL STAGED STABLE"),
+                    SettingRow("install-nightly", "Install nightly update", "Install the newest operator-staged nightly build. Nightly may contain incomplete behavior.", RowKind.ACTION, "Staged release", confirm="Install the staged nightly release and switch this machine to the nightly channel?", field_label="RELEASE ACTION", field_value="INSTALL STAGED NIGHTLY"),
                     SettingRow("rollback", "Roll back", "Restore the previously installed verified release.", RowKind.ACTION, "Unavailable", available=False, reason="No previous release is stored on this machine."),
                 ],
             ),
@@ -219,5 +252,8 @@ def build_fixture_model(device_name: str = "BATMINI", ip_address: str = "192.168
 
                 ],
             ),
-        ]
+        ],
+        web_address=f"http://{ip_address}:8787",
+        web_runtime_available=web_runtime_available,
+        tailscale_address=tailscale_address,
     )

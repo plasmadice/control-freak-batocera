@@ -2,7 +2,7 @@ import pygame
 
 from control_freak.app import save_screenshot
 from control_freak.model import Action, build_fixture_model
-from control_freak.ui import FONT_BOLD, FONT_REGULAR, HEIGHT, WIDTH, context_title_lines, font, render
+from control_freak.ui import FONT_BOLD, FONT_REGULAR, HEIGHT, WIDTH, context_title_lines, context_value_lines, font, render
 
 
 def test_render_produces_full_logical_canvas() -> None:
@@ -40,6 +40,13 @@ def test_context_titles_fit_field_note_panel() -> None:
             lines = context_title_lines(row.label)
             assert 1 <= len(lines) <= 2
             assert all(font(21, True).size(line)[0] <= 232 for line in lines)
+
+
+def test_field_note_values_wrap_inside_panel() -> None:
+    pygame.init()
+    lines = context_value_lines("Ethernet · 192.168.100.200")
+    assert 1 <= len(lines) <= 2
+    assert all(font(19, True).size(line)[0] <= 232 for line in lines)
 
 
 def test_fonts_are_packaged_assets() -> None:

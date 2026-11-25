@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 import xml.etree.ElementTree as ET
 
 import pygame
@@ -29,8 +30,11 @@ ES_BUTTON_ACTIONS = {
     "down": Action.DOWN,
     "left": Action.LEFT,
     "right": Action.RIGHT,
-    "a": Action.SELECT,
-    "b": Action.BACK,
+    # EmulationStation names face buttons Nintendo-style: B is south, A is east.
+    "b": Action.SELECT,
+    "a": Action.BACK,
+    "start": None,
+    "select": None,
 }
 
 
@@ -41,13 +45,13 @@ class ControllerIdentity:
     guid: str
 
 
-def load_controller_bindings(path: Path, controllers: list[ControllerIdentity]) -> dict[int, dict[int, Action]]:
+def load_controller_bindings(path: Path, controllers: list[ControllerIdentity]) -> dict[int, dict[int, Action | None]]:
     try:
         configs = ET.parse(path).getroot().findall("inputConfig")
     except (OSError, ET.ParseError):
         return {}
 
-    bindings: dict[int, dict[int, Action]] = {}
+    bindings: dict[int, dict[int, Action | None]] = {}
     for controller in controllers:
         matches = [
             config
@@ -60,7 +64,7 @@ def load_controller_bindings(path: Path, controllers: list[ControllerIdentity]) 
             matches = [config for config in configs if config.get("deviceName") == controller.name]
         if not matches:
             continue
-        buttons = {
+        buttons: dict[int, Action | None] = {
             int(item.get("id", "-1")): ES_BUTTON_ACTIONS[item.get("name", "")]
             for item in matches[-1].findall("input")
             if item.get("type") == "button" and item.get("name") in ES_BUTTON_ACTIONS
@@ -71,7 +75,7 @@ def load_controller_bindings(path: Path, controllers: list[ControllerIdentity]) 
 
 def actions_for_event(
     event: pygame.event.Event,
-    controller_bindings: dict[int, dict[int, Action]] | None = None,
+    controller_bindings: dict[int, dict[int, Action | None]] | None = None,
 ) -> list[Action]:
     if event.type == pygame.KEYDOWN and event.key in KEY_ACTIONS:
         return [KEY_ACTIONS[event.key]]
@@ -91,3 +95,22 @@ def actions_for_event(
         if event.button in (1, 6):
             return [Action.BACK]
     return []
+
+
+class EventRouter:
+    """Suppress Batocera's keyboard echo when the same press arrived from a pad."""
+
+    def __init__(self, controller_bindings: dict[int, dict[int, Action | None]]) -> None:
+        self.controller_bindings = controller_bindings
+        self.last_pad_activity = float("-inf")
+
+    def actions(self, events: list[pygame.event.Event], now: float | None = None) -> list[Action]:
+        timestamp = time.monotonic() if now is None else now
+        if any(event.type in (pygame.JOYBUTTONDOWN, pygame.JOYHATMOTION) for event in events):
+            self.last_pad_activity = timestamp
+        output = []
+        for event in events:
+            if event.type == pygame.KEYDOWN and timestamp - self.last_pad_activity < 0.3:
+                continue
+            output.extend(actions_for_event(event, self.controller_bindings))
+        return output

@@ -27,6 +27,9 @@ STATIC_FILES = (
     "logo-proposal-1.png",
     "logo-proposal-2.png",
     "logo-proposal-3.png",
+    "logo-proposal-4.png",
+    "logo-proposal-5.png",
+    "logo-proposal-6.png",
     "install_batocera.py",
 )
 STATIC_MODES = {
@@ -35,6 +38,9 @@ STATIC_MODES = {
     "logo-proposal-1.png": 0o644,
     "logo-proposal-2.png": 0o644,
     "logo-proposal-3.png": 0o644,
+    "logo-proposal-4.png": 0o644,
+    "logo-proposal-5.png": 0o644,
+    "logo-proposal-6.png": 0o644,
     "install_batocera.py": 0o755,
 }
 ROOT_MANIFEST = "install-manifest.json"
@@ -456,6 +462,9 @@ def _required(source: Path) -> dict[str, Path]:
         "logo-proposal-1.png": source / "assets/control-freak-logo-1.png",
         "logo-proposal-2.png": source / "assets/control-freak-logo-2.png",
         "logo-proposal-3.png": source / "assets/control-freak-logo-3.png",
+        "logo-proposal-4.png": source / "assets/control-freak-logo-4.png",
+        "logo-proposal-5.png": source / "assets/control-freak-logo-5.png",
+        "logo-proposal-6.png": source / "assets/control-freak-logo-6.png",
         "install_batocera.py": source / "deploy/install_batocera.py",
     }
     if not all(path.is_file() and not path.is_symlink() for path in paths.values()):

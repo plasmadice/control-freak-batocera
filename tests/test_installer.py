@@ -63,6 +63,9 @@ def test_install_manages_logo_proposals(tmp_path: Path, source_root: Path) -> No
         "logo-proposal-1.png",
         "logo-proposal-2.png",
         "logo-proposal-3.png",
+        "logo-proposal-4.png",
+        "logo-proposal-5.png",
+        "logo-proposal-6.png",
     }
     assert (root / "image.png").read_bytes() == (root / "logo-proposal-1.png").read_bytes()
 
@@ -423,6 +426,9 @@ def test_current_pointer_symlink_is_unknown_and_preserved(tmp_path: Path, source
         "assets/control-freak-logo-1.png",
         "assets/control-freak-logo-2.png",
         "assets/control-freak-logo-3.png",
+        "assets/control-freak-logo-4.png",
+        "assets/control-freak-logo-5.png",
+        "assets/control-freak-logo-6.png",
         "deploy/install_batocera.py",
     ],
 )
