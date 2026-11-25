@@ -441,6 +441,18 @@ def test_update_refuses_changed_lifecycle_protocol_source(tmp_path: Path, source
     assert registered(root)
 
 
+def test_nfs_group_write_mode_normalization_is_accepted(tmp_path: Path, source_root: Path) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    root = app(tmp_path)
+    for name in installer.STATIC_FILES:
+        expected = installer.STATIC_MODES[name]
+        (root / name).chmod(expected | 0o020)
+
+    operations = install(tmp_path, source_root, "one", "stable", force=True)
+
+    assert operations[0] == "reselect release one"
+
+
 def test_update_refuses_changed_stable_file_mode(tmp_path: Path, source_root: Path) -> None:
     install(tmp_path, source_root, "one", "stable")
     launcher = app(tmp_path) / "control-freak.pygame"

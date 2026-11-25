@@ -291,7 +291,7 @@ def _load_install(app: Path, expected_static: dict[str, bytes] | None = None) ->
                 not target.is_symlink()
                 and target.is_file()
                 and checksum(target) == manifest["static"][name]
-                and target.stat().st_mode & 0o777 == STATIC_MODES[name]
+                and (target.stat().st_mode & 0o777) in {STATIC_MODES[name], STATIC_MODES[name] | 0o020}
             )
         except OSError:
             matches = False
