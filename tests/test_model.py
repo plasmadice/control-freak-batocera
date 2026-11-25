@@ -12,9 +12,18 @@ def test_fixture_covers_first_prototype_states() -> None:
         RowKind.ACTION,
     }
     assert any(row.available is False and row.reason for row in rows)
-    assert any(row.level == "error" for row in rows)
+
     assert any(row.id == "rollback" for row in rows)
     assert any(len(row.description) > 100 for row in rows)
+
+
+def test_local_app_omits_library_and_lockout_prone_controls() -> None:
+    model = build_fixture_model(device_name="BATO", ip_address="192.168.1.50")
+    row_ids = {row.id for section in model.sections for row in section.rows}
+
+    assert model.row("device").value == "BATO"
+    assert model.row("network-status").value == "192.168.1.50"
+    assert row_ids.isdisjoint({"rom-scan", "resolution", "restart-emulationstation", "reboot"})
 
 
 def test_navigation_wraps_sections_and_clamps_rows() -> None:
@@ -70,7 +79,7 @@ def test_web_access_disable_confirmation_matches_transition() -> None:
 
 def test_back_cancels_confirmation_without_mutating() -> None:
     model = build_fixture_model()
-    model.select("restart-emulationstation")
+    model.select("install-stable")
 
     model.dispatch(Action.SELECT)
     assert model.pending_confirmation is not None

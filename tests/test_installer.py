@@ -54,6 +54,19 @@ def test_install_registers_versioned_pygame_application(tmp_path: Path, source_r
     assert registered(tmp_path)
 
 
+def test_install_manages_logo_proposals(tmp_path: Path, source_root: Path) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    root = app(tmp_path)
+    manifest = json.loads((root / "install-manifest.json").read_text())
+
+    assert manifest["static"].keys() >= {
+        "logo-proposal-1.png",
+        "logo-proposal-2.png",
+        "logo-proposal-3.png",
+    }
+    assert (root / "image.png").read_bytes() == (root / "logo-proposal-1.png").read_bytes()
+
+
 def test_release_source_rejects_symlink_to_external_file(tmp_path: Path, source_root: Path) -> None:
     source = copied_source(tmp_path, source_root)
     external = tmp_path / "external.py"
@@ -404,7 +417,14 @@ def test_current_pointer_symlink_is_unknown_and_preserved(tmp_path: Path, source
 
 @pytest.mark.parametrize(
     "relative",
-    ["deploy/control-freak.pygame", "assets/control-freak-image.png", "deploy/install_batocera.py"],
+    [
+        "deploy/control-freak.pygame",
+        "assets/control-freak-image.png",
+        "assets/control-freak-logo-1.png",
+        "assets/control-freak-logo-2.png",
+        "assets/control-freak-logo-3.png",
+        "deploy/install_batocera.py",
+    ],
 )
 def test_update_refuses_changed_lifecycle_protocol_source(tmp_path: Path, source_root: Path, relative: str) -> None:
     source = copied_source(tmp_path, source_root)

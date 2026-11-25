@@ -21,8 +21,22 @@ PYGAME_REL = Path("roms/pygame")
 GAME_PATH = "./control-freak/control-freak.pygame"
 RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-STATIC_FILES = ("control-freak.pygame", "image.png", "install_batocera.py")
-STATIC_MODES = {"control-freak.pygame": 0o755, "image.png": 0o644, "install_batocera.py": 0o755}
+STATIC_FILES = (
+    "control-freak.pygame",
+    "image.png",
+    "logo-proposal-1.png",
+    "logo-proposal-2.png",
+    "logo-proposal-3.png",
+    "install_batocera.py",
+)
+STATIC_MODES = {
+    "control-freak.pygame": 0o755,
+    "image.png": 0o644,
+    "logo-proposal-1.png": 0o644,
+    "logo-proposal-2.png": 0o644,
+    "logo-proposal-3.png": 0o644,
+    "install_batocera.py": 0o755,
+}
 ROOT_MANIFEST = "install-manifest.json"
 CURRENT = "current.json"
 RELEASE_MANIFEST = "manifest.json"
@@ -439,6 +453,9 @@ def _required(source: Path) -> dict[str, Path]:
     paths = {
         "control-freak.pygame": source / "deploy/control-freak.pygame",
         "image.png": source / "assets/control-freak-image.png",
+        "logo-proposal-1.png": source / "assets/control-freak-logo-1.png",
+        "logo-proposal-2.png": source / "assets/control-freak-logo-2.png",
+        "logo-proposal-3.png": source / "assets/control-freak-logo-3.png",
         "install_batocera.py": source / "deploy/install_batocera.py",
     }
     if not all(path.is_file() and not path.is_symlink() for path in paths.values()):

@@ -156,7 +156,7 @@ class AppModel:
             self.last_action = row.id
 
 
-def build_fixture_model() -> AppModel:
+def build_fixture_model(device_name: str = "BATMINI", ip_address: str = "192.168.1.87") -> AppModel:
     return AppModel(
         sections=[
             Section(
@@ -164,10 +164,10 @@ def build_fixture_model() -> AppModel:
                 "Overview",
                 "Current machine state and the few things that need attention.",
                 [
-                    SettingRow("device", "Machine", "The Batocera system currently running Control Freak.", RowKind.READONLY, "BATMINI"),
+                    SettingRow("device", "Machine", "The Batocera system currently running Control Freak.", RowKind.READONLY, device_name),
                     SettingRow("health", "System health", "Core services are responding and persistent storage is writable.", RowKind.READONLY, "Healthy", level="good"),
                     SettingRow("storage", "Userdata storage", "Available capacity on /userdata.", RowKind.READONLY, "184 GB free"),
-                    SettingRow("rom-scan", "Game library", "One library source could not be reached during the last scan.", RowKind.READONLY, "Needs attention", level="error"),
+
                 ],
             ),
             Section(
@@ -175,7 +175,7 @@ def build_fixture_model() -> AppModel:
                 "Display & Audio",
                 "Cabinet-facing output settings with the active value always visible.",
                 [
-                    SettingRow("resolution", "Display mode", "Resolution selected by Batocera for the current output.", RowKind.READONLY, "1920 × 1080 · 60 Hz"),
+
                     SettingRow("audio-output", "Audio output", "Cycle through outputs detected by Batocera.", RowKind.CHOICE, "HDMI", ("HDMI", "Analog", "Auto")),
                     SettingRow("volume", "System volume", "The master volume managed by Batocera.", RowKind.CHOICE, "80%", ("60%", "70%", "80%", "90%", "100%")),
                     SettingRow("crt-mode", "CRT output profile", "Requires a compatible analog video configuration.", RowKind.CHOICE, "Off", ("Off",), False, "No compatible CRT profile was detected."),
@@ -186,7 +186,7 @@ def build_fixture_model() -> AppModel:
                 "Network & Web",
                 "Local connectivity and optional browser access to this machine.",
                 [
-                    SettingRow("network-status", "Network", "Current local connection and address.", RowKind.READONLY, "Ethernet · 192.168.1.87", level="good"),
+                    SettingRow("network-status", "Network", "Current local connection and address.", RowKind.READONLY, ip_address, level="good"),
                     SettingRow(
                         "web-access",
                         "Web access",
@@ -216,8 +216,7 @@ def build_fixture_model() -> AppModel:
                 "Diagnostics and carefully bounded machine actions.",
                 [
                     SettingRow("diagnostics", "Export diagnostics", "Create a support archive that excludes credentials and game content.", RowKind.ACTION, "Create archive"),
-                    SettingRow("restart-emulationstation", "Restart EmulationStation", "Close and reopen the Batocera front end. Running games are never interrupted by this action.", RowKind.ACTION, "Restart", confirm="Restart EmulationStation now? Control Freak will close while the front end restarts."),
-                    SettingRow("reboot", "Reboot machine", "Restart Batocera after a final confirmation.", RowKind.ACTION, "Reboot", confirm="Reboot this machine now?"),
+
                 ],
             ),
         ]

@@ -66,7 +66,7 @@ def _header(surface: pygame.Surface, model: AppModel) -> None:
 
     pygame.draw.line(surface, RULE, (875, 22), (875, 68), 1)
     label(surface, "MACHINE", 904, 19, 11, MUTED, True)
-    label(surface, "BATMINI", 904, 39, 20, TEXT, True)
+    label(surface, str(model.row("device").value).upper(), 904, 39, 20, TEXT, True)
     pygame.draw.circle(surface, TEAL, (1174, 43), 6)
     label(surface, "LOCAL", 1190, 34, 14, TEAL, True)
 
