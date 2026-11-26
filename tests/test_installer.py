@@ -1,5 +1,6 @@
 import json
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -185,6 +186,52 @@ def test_live_install_service_actions_use_batocera_service_manager(monkeypatch) 
     ]
 
 
+def test_live_service_status_inherits_lifecycle_lock(monkeypatch) -> None:
+    calls = []
+    real_fstat = os.fstat
+    real_stat = os.stat
+    lock_path = Path("/userdata") / installer.APP_PARENT_REL / installer.LOCK_FILE
+    monkeypatch.setattr(installer, "_ACTIVE_LIFECYCLE_LOCK", 99)
+    monkeypatch.setattr(installer.os, "fstat", lambda fd: SimpleNamespace(st_dev=1, st_ino=2) if fd == 99 else real_fstat(fd))
+    monkeypatch.setattr(
+        installer.os,
+        "stat",
+        lambda path, *args, **kwargs: SimpleNamespace(st_dev=1, st_ino=2) if Path(path) == lock_path else real_stat(path, *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)) or subprocess.CompletedProcess(command, 0),
+    )
+
+    assert installer._service_running(Path("/userdata")) is True
+    assert calls[0][0] == ["/usr/bin/batocera-services", "status", "control_freak"]
+    assert calls[0][1]["pass_fds"] == (99,)
+    assert calls[0][1]["env"]["CONTROL_FREAK_LIFECYCLE_FD"] == "99"
+
+
+@pytest.mark.parametrize(
+    "returncode, stdout, stderr",
+    [
+        (0, "unexpected output\n", ""),
+        (1, "", "Invalid Control Freak PID evidence\n"),
+    ],
+)
+def test_live_service_status_rejects_ambiguous_result(
+    monkeypatch, returncode: int, stdout: str, stderr: str
+) -> None:
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, returncode, stdout, stderr
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="determine Control Freak service state"):
+        installer._service_running(Path("/userdata"))
+
+
 @pytest.mark.parametrize("marker, expected", [("*", True), ("-", False)])
 def test_live_service_state_parses_semicolon_listing(monkeypatch, marker: str, expected: bool) -> None:
     def run(command, **_kwargs):
@@ -236,6 +283,33 @@ def test_live_uninstall_clears_runtime_state_with_installed_release(monkeypatch)
     assert calls[0][0] == ["/usr/bin/batocera-services", "stop", "control_freak"]
     assert calls[1][0] == ["/usr/bin/batocera-services", "disable", "control_freak"]
     assert any(write[1] == installer.RUNTIME_LOCKOUT for write in writes)
+
+
+def test_live_uninstall_accepts_nonzero_stop_after_worker_exits(monkeypatch) -> None:
+    actions = []
+    service = {"enabled": True, "running": True}
+
+    def action(_root: Path, requested: str) -> None:
+        actions.append(requested)
+        if requested == "stop":
+            service["running"] = False
+            raise RuntimeError("Unable to stop Control Freak service")
+        service["enabled"] = False
+
+    monkeypatch.setattr(installer, "_service_actions", action)
+    monkeypatch.setattr(installer, "_service_enabled", lambda _root: service["enabled"])
+    monkeypatch.setattr(installer, "_service_running", lambda _root: service["running"])
+    monkeypatch.setattr(installer, "_prepare_state_directory", lambda _root: None)
+    monkeypatch.setattr(installer.os, "open", lambda *args, **kwargs: 99)
+    monkeypatch.setattr(installer.os, "close", lambda _fd: None)
+    monkeypatch.setattr(installer.fcntl, "flock", lambda *_args: None)
+    monkeypatch.setattr(installer, "_read_at", lambda *_args: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setattr(installer, "_atomic_write_at", lambda *_args: None)
+    monkeypatch.setattr(installer.os, "unlink", lambda *_args, **_kwargs: None)
+
+    installer._shutdown_runtime(Path("/userdata"), "release-one", True)
+
+    assert actions == ["stop", "disable"]
 
 
 def test_live_uninstall_releases_web_lock_before_service_action(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1338,6 +1412,21 @@ def test_uninstall_refuses_modified_web_service(tmp_path: Path, source_root: Pat
 
     assert service.read_text() == "modified"
     assert app(tmp_path).is_dir()
+
+
+def test_repository_release_trust_matches_runtime_payload(tmp_path: Path) -> None:
+    source = Path(__file__).resolve().parents[1]
+    destination = tmp_path / "release"
+    destination.mkdir()
+    spec = importlib.util.spec_from_file_location("repository_installer", source / "deploy/install_batocera.py")
+    assert spec is not None and spec.loader is not None
+    repository_installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(repository_installer)
+
+    manifest = repository_installer._release_source(source, destination, "repository-test")
+
+    paths = [entry["path"] for entry in manifest["files"]]
+    assert paths == sorted(paths)
 
 
 def test_release_source_rejects_symlink_to_external_file(tmp_path: Path, source_root: Path) -> None:

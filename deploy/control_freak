@@ -128,7 +128,11 @@ def canonical_wrapper() -> bytes:
         f"STATE = Path({str(STATE)!r})".encode(): b"STATE = Path(" + b'"/userdata/system/control-freak")',
     }
     for current, canonical in replacements.items():
-        if data.count(current) != 1:
+        current_count = data.count(current)
+        canonical_count = data.count(canonical)
+        if current_count == 0 and canonical_count == 1:
+            continue
+        if current_count != 1 or canonical_count != 0:
             raise RuntimeError("Invalid Control Freak service wrapper")
         data = data.replace(current, canonical)
     return data

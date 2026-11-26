@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import signal
 import sys
@@ -135,6 +136,13 @@ def make_wrapper(tmp_path: Path, web: str) -> tuple[Path, Path, Path]:
     script.chmod(0o755)
     bind_wrapper(app, script)
     return app, state, script
+
+
+def test_canonical_service_wrapper_accepts_production_paths() -> None:
+    script = Path(__file__).parents[1] / "deploy/control_freak"
+    namespace = runpy.run_path(str(script), run_name="probe")
+
+    assert namespace["canonical_wrapper"]() == script.read_bytes()
 
 
 def test_service_uses_start_stop_daemon_cycle(tmp_path: Path) -> None:

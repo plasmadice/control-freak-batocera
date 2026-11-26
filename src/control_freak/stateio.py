@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import secrets
 import stat
+from typing import ContextManager, Iterator, Literal, overload
 
 LOCK_NAME = "web.lock"
 LOCKOUT_NAME = "runtime.lockout"
@@ -36,8 +37,16 @@ def _open_directory(path: Path, *, create: bool) -> int:
         raise
 
 
+@overload
+def locked(path: Path, *, lock_name: str = LOCK_NAME, yield_lock: Literal[False] = False) -> ContextManager[tuple[int, str]]: ...
+
+
+@overload
+def locked(path: Path, *, lock_name: str = LOCK_NAME, yield_lock: Literal[True]) -> ContextManager[tuple[int, str, int]]: ...
+
+
 @contextmanager
-def locked(path: Path, *, lock_name: str = LOCK_NAME, yield_lock: bool = False):
+def locked(path: Path, *, lock_name: str = LOCK_NAME, yield_lock: bool = False) -> Iterator[tuple[int, str] | tuple[int, str, int]]:
     directory_fd = _open_directory(path.parent, create=True)
     lock_fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
     try:

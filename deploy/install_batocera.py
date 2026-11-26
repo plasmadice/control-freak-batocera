@@ -970,9 +970,7 @@ def _service_bytes(source: Path, root: Path) -> bytes:
     return text.encode()
 
 
-def _service_actions(root: Path, *actions: str) -> None:
-    if root != Path("/userdata"):
-        return
+def _service_action_kwargs(root: Path) -> dict:
     kwargs = {}
     if _ACTIVE_LIFECYCLE_LOCK is not None:
         try:
@@ -985,6 +983,13 @@ def _service_actions(root: Path, *actions: str) -> None:
                 environment = os.environ.copy()
                 environment["CONTROL_FREAK_LIFECYCLE_FD"] = str(_ACTIVE_LIFECYCLE_LOCK)
                 kwargs = {"env": environment, "pass_fds": (_ACTIVE_LIFECYCLE_LOCK,)}
+    return kwargs
+
+
+def _service_actions(root: Path, *actions: str) -> None:
+    if root != Path("/userdata"):
+        return
+    kwargs = _service_action_kwargs(root)
     for action in actions:
         result = subprocess.run(["/usr/bin/batocera-services", action, SERVICE_NAME], check=False, **kwargs)
         if result.returncode:
@@ -1006,7 +1011,20 @@ def _service_enabled(root: Path) -> bool:
 def _service_running(root: Path) -> bool:
     if root != Path("/userdata"):
         return True
-    return subprocess.run(["/usr/bin/batocera-services", "status", SERVICE_NAME], check=False).returncode == 0
+    result = subprocess.run(
+        ["/usr/bin/batocera-services", "status", SERVICE_NAME],
+        capture_output=True,
+        text=True,
+        check=False,
+        **_service_action_kwargs(root),
+    )
+    if result.stdout or result.stderr:
+        raise RuntimeError("Unable to determine Control Freak service state")
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise RuntimeError("Unable to determine Control Freak service state")
 
 
 def _restore_service_state(root: Path, enabled: bool, running: bool) -> None:
@@ -1231,7 +1249,11 @@ def _shutdown_runtime(root: Path, release_id: str, service_present: bool) -> tup
 
         try:
             if service_present and service_running:
-                _service_actions(root, "stop")
+                try:
+                    _service_actions(root, "stop")
+                except RuntimeError:
+                    if _service_running(root):
+                        raise
                 if _service_running(root):
                     raise RuntimeError("Unable to stop Control Freak service")
             elif not service_present:

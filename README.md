@@ -23,7 +23,7 @@ The Web app uses a persistent device-local self-signed HTTPS certificate. Browse
 The manifest-driven installer creates a dedicated `controlfreak` EmulationStation system. Immutable releases live below root-owned `/userdata/system/control-freak/app/releases`; an atomic `current.json` selects the active release. Its library contains only an inert `.controlfreak` marker, metadata, and artwork. Nothing executable is installed below `/userdata/roms`.
 
 ```bash
-python3 deploy/install_batocera.py --source . --release-id 0.1.1 --channel stable
+python3 deploy/install_batocera.py --source . --release-id 0.1.2 --channel stable
 ```
 
 The root-owned EmulationStation overlay invokes `/userdata/system/services/control_freak launch` directly. The application, overlay, library metadata, and service wrapper must be root-owned, non-symlinked, and not group/world writable. Cryptographic verification starts in the service wrapper, which verifies the signed runtime before executing it. The installer migrates the former `/userdata/roms/pygame/control-freak` layout and removes only its owned legacy gamelist entry.
