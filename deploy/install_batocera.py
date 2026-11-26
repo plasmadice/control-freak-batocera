@@ -149,8 +149,8 @@ def _require_supported_batocera(path: Path | None = None) -> None:
             values[key] = parsed[0] if parsed else ""
     except ValueError as exc:
         raise RuntimeError("Direct install requires Batocera 43 or 44") from exc
-    version = values.get("VERSION_ID", "")
-    if values.get("ID") != "batocera" or not re.fullmatch(r"(?:43|44)(?:\.[0-9]+)*", version):
+    version = values.get("VERSION", "")
+    if values.get("NAME") != "Batocera.linux" or values.get("ID") != "buildroot" or not re.fullmatch(r"(?:43|44)(?:\.[0-9]+)*", version):
         raise RuntimeError("Direct install requires Batocera 43 or 44")
 
 

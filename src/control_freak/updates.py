@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -234,13 +235,26 @@ def verify_metadata(statement: bytes, signature: bytes, public_key: bytes, asset
 
 def _batocera_version(path: Path = Path("/etc/os-release")) -> str | None:
     try:
-        for line in path.read_text().splitlines():
-            if line.startswith("VERSION_ID="):
-                value = line.split("=", 1)[1].strip().strip('"')
-                return value.split(".", 1)[0] if re.fullmatch(r"[0-9]{2}(?:\.[0-9]+)?", value) else None
-    except OSError:
-        pass
-    return None
+        data = path.read_text()
+        if len(data.encode()) > 65536:
+            return None
+        values = {}
+        for line in data.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            key, separator, raw = line.partition("=")
+            if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key in values:
+                return None
+            parsed = shlex.split(raw, comments=False, posix=True)
+            if len(parsed) != 1 and not (not parsed and raw == ""):
+                return None
+            values[key] = parsed[0] if parsed else ""
+    except (OSError, UnicodeError, ValueError):
+        return None
+    version = values.get("VERSION", "")
+    if values.get("NAME") != "Batocera.linux" or values.get("ID") != "buildroot" or not re.fullmatch(r"(?:43|44)(?:\.[0-9]+)*", version):
+        return None
+    return version.split(".", 1)[0]
 
 
 def download(url: str, size: int, sha256: str, opener=_open) -> bytes:

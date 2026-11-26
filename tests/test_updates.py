@@ -124,6 +124,15 @@ def test_signed_metadata_accepts_target_python_314_and_rejects_315(monkeypatch: 
         )
 
 
+def test_batocera_version_uses_real_os_release_identity(tmp_path: Path) -> None:
+    path = tmp_path / "os-release"
+    path.write_text('NAME=Batocera.linux\nID=buildroot\nVERSION="43.1"\nVERSION_ID=2024.11\n')
+    assert updates._batocera_version(path) == "43"
+
+    path.write_text('NAME=Other\nID=buildroot\nVERSION="43.1"\nVERSION_ID=2024.11\n')
+    assert updates._batocera_version(path) is None
+
+
 def test_signed_metadata_rejects_indeterminate_batocera_version(monkeypatch: pytest.MonkeyPatch) -> None:
     value = metadata()
     statement = canonical(value)

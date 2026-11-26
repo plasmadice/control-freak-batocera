@@ -3,7 +3,7 @@
     {
       "mode": 420,
       "path": "control_freak/__init__.py",
-      "sha256": "a086ad2c3f77c3f404287bc6d2457315fb77240f3914fcc338c24f791e7f8aa6"
+      "sha256": "0eb9c886b470b70e065a9196db695798846ae6ecaa26ce48e77537c868e4cec0"
     },
     {
       "mode": 420,
@@ -48,7 +48,7 @@
     {
       "mode": 420,
       "path": "control_freak/runtime.py",
-      "sha256": "04c61892b8bc981cf6730ab55bc4757660b0cb722e350589098f995e4eee0f5e"
+      "sha256": "716824af97bce7ed202a791e40d688b238dff65689e5f11b7c86c1eba027bdaa"
     },
     {
       "mode": 420,
@@ -58,7 +58,7 @@
     {
       "mode": 420,
       "path": "control_freak/stateio.py",
-      "sha256": "793f90afb1f1f8eac06654a2e8a6ad9635825891bfe25d6b87b738ab4d43ac7b"
+      "sha256": "5bbdb1b724052c8692a55683f813dfba60dd0be40ece0b87f1937b1424798102"
     },
     {
       "mode": 420,
@@ -73,7 +73,7 @@
     {
       "mode": 420,
       "path": "control_freak/updates.py",
-      "sha256": "125740b4233f30daafa0ee4ce468d92e725407c2113e756e518eca3b2a1c5d29"
+      "sha256": "3419cdbd10439a54e9cb58d94ded1b959f1812dff4449d765baf9601f66c4151"
     },
     {
       "mode": 420,
@@ -83,7 +83,7 @@
   ],
   "service": {
     "mode": 493,
-    "sha256": "36a2144f2fe3a4237404868b6344ceefee86d894f6412c486a17cd9a5906d0dd"
+    "sha256": "1710f3087b2f6bc9b9bbab24b18e3f7d537dc9e3a8f1d3a6727ea42910020cfd"
   },
   "source": [
     {
@@ -124,12 +124,12 @@
     {
       "mode": 493,
       "path": "deploy/control_freak",
-      "sha256": "6ecc2e42467414abc87c6e336a56be10be19666aa04953f881c7df7e916d078e"
+      "sha256": "40df6fd0473b3e7da229f33fa5219fddb5bb9c156ce5f275a738d5b9e52156ae"
     },
     {
       "mode": 420,
       "path": "deploy/install_batocera.py",
-      "sha256": "12497b921633291a15e5781e464547b47aef3020a6b25f5b36d65644937aece4"
+      "sha256": "a7cc26a821e21f6a07e8cf27fce365b3563c5ab68083456de05ea88c16745898"
     },
     {
       "mode": 420,

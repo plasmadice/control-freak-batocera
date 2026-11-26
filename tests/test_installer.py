@@ -19,7 +19,7 @@ from deploy.install_batocera import install, rollback, rollback_info, uninstall
 @pytest.fixture(autouse=True)
 def batocera_os_release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path = tmp_path.parent / f"{tmp_path.name}-os-release"
-    path.write_text('ID=batocera\nVERSION_ID="43"\n')
+    path.write_text('NAME=Batocera.linux\nID=buildroot\nVERSION="43.1"\nVERSION_ID=2024.11\n')
     monkeypatch.setattr(installer, "OS_RELEASE_PATH", path)
     return path
 
@@ -33,13 +33,14 @@ def source_root(tmp_path: Path) -> Path:
 
 
 @pytest.mark.parametrize("contents", [
-    'ID=batocera\n',
-    'ID=batocera\nVERSION_ID=42\n',
-    'ID=batocera\nVERSION_ID=45\n',
-    'ID=batocera\nVERSION_ID=43beta\n',
-    'ID=other\nVERSION_ID=43\n',
-    'ID=batocera\nVERSION_ID=43\nVERSION_ID=44\n',
-    'ID =batocera\nVERSION_ID=43\n',
+    'NAME=Batocera.linux\nID=buildroot\n',
+    'NAME=Batocera.linux\nID=buildroot\nVERSION=42\n',
+    'NAME=Batocera.linux\nID=buildroot\nVERSION=45\n',
+    'NAME=Batocera.linux\nID=buildroot\nVERSION=43beta\n',
+    'NAME=Other\nID=buildroot\nVERSION=43\n',
+    'NAME=Batocera.linux\nID=other\nVERSION=43\n',
+    'NAME=Batocera.linux\nID=buildroot\nVERSION=43\nVERSION=44\n',
+    'NAME =Batocera.linux\nID=buildroot\nVERSION=43\n',
 ])
 def test_install_rejects_unsupported_or_malformed_os_release_before_mutation(
     tmp_path: Path, source_root: Path, batocera_os_release: Path, contents: str,
@@ -56,7 +57,9 @@ def test_install_rejects_unsupported_or_malformed_os_release_before_mutation(
 def test_install_accepts_supported_batocera_major(
     tmp_path: Path, source_root: Path, batocera_os_release: Path, version: str,
 ) -> None:
-    batocera_os_release.write_text(f'NAME="Batocera.linux"\nID=batocera\nVERSION_ID="{version}"\n')
+    batocera_os_release.write_text(
+        f'NAME="Batocera.linux"\nID=buildroot\nVERSION="{version}"\nVERSION_ID=2026.05-git\n'
+    )
 
     assert install(tmp_path / "userdata", source_root, "1.0.0", "stable")
 
