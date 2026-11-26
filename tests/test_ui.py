@@ -1,8 +1,10 @@
 import pygame
+import sys
+from types import SimpleNamespace
 
 from control_freak.app import save_screenshot
 from control_freak.model import Action, build_fixture_model
-from control_freak.ui import FONT_BOLD, FONT_REGULAR, HEIGHT, WIDTH, context_title_lines, context_value_lines, font, render
+from control_freak.ui import FONT_BOLD, FONT_REGULAR, HEIGHT, WIDTH, _draw_qr, _visible_rows, context_title_lines, context_value_lines, font, render
 
 
 def test_render_produces_full_logical_canvas() -> None:
@@ -17,6 +19,16 @@ def test_render_produces_full_logical_canvas() -> None:
     assert surface.get_at((10, 10)) != surface.get_at((640, 360))
 
 
+def test_long_sections_scroll_to_keep_the_selected_row_visible() -> None:
+    model = build_fixture_model(previous_version="0.0.9")
+    model.select("rollback")
+
+    start, rows = _visible_rows(model)
+
+    assert start == 1
+    assert [row.id for row in rows][-1] == "rollback"
+
+
 def test_confirmation_renders_over_existing_screen() -> None:
     pygame.init()
     surface = pygame.Surface((WIDTH, HEIGHT))
@@ -29,6 +41,19 @@ def test_confirmation_renders_over_existing_screen() -> None:
     render(surface, model)
 
     assert model.pending_confirmation is not None
+    assert surface.get_at((100, 100)) != before
+
+
+def test_release_notes_overlay_renders_over_existing_screen() -> None:
+    pygame.init()
+    surface = pygame.Surface((WIDTH, HEIGHT))
+    model = build_fixture_model(notes_available=True)
+    render(surface, model)
+    before = surface.get_at((100, 100))
+
+    model.show_overlay("What's new", "Readable authenticated release notes.")
+    render(surface, model)
+
     assert surface.get_at((100, 100)) != before
 
 
@@ -62,3 +87,25 @@ def test_screenshot_can_render_twice_deterministically(tmp_path) -> None:
     save_screenshot(second)
 
     assert first.read_bytes() == second.read_bytes()
+
+
+def test_qr_code_is_drawn_from_pairing_url(monkeypatch) -> None:
+    class FakeQR:
+        def __init__(self, **_kwargs):
+            pass
+
+        def add_data(self, _value):
+            pass
+
+        def make(self, **_kwargs):
+            pass
+
+        def get_matrix(self):
+            return [[True, False], [False, True]]
+
+    monkeypatch.setitem(sys.modules, "qrcode", SimpleNamespace(QRCode=FakeQR))
+    surface = pygame.Surface((40, 40))
+
+    assert _draw_qr(surface, "http://example/pair", pygame.Rect(0, 0, 40, 40)) is True
+    assert surface.get_at((5, 5)) == pygame.Color("black")
+    assert surface.get_at((25, 5)) == pygame.Color("white")

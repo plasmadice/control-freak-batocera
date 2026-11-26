@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from importlib import resources
+from io import BytesIO
 from pathlib import Path
 
 import pygame
@@ -31,7 +33,9 @@ _fonts: dict[tuple[int, bool], pygame.font.Font] = {}
 def font(size: int, bold: bool = False) -> pygame.font.Font:
     key = (size, bold)
     if key not in _fonts:
-        _fonts[key] = pygame.font.Font(FONT_BOLD if bold else FONT_REGULAR, size)
+        name = "assets/fonts/DejaVuSans-Bold.ttf" if bold else "assets/fonts/DejaVuSans.ttf"
+        data = resources.files("control_freak").joinpath(name).read_bytes()
+        _fonts[key] = pygame.font.Font(BytesIO(data), size)
     return _fonts[key]
 
 
@@ -43,13 +47,34 @@ def context_title_lines(text: str) -> list[str]:
     return wrap_text(text, font(21, True), 232)[:2]
 
 
-def context_value_lines(text: str) -> list[str]:
-    return wrap_text(text, font(19, True), 232)[:2]
+def context_value_lines(text: str, size: int = 19, limit: int = 2) -> list[str]:
+    return wrap_text(text, font(size, True), 232)[:limit]
 
 
 def label(surface: pygame.Surface, text: str, x: int, y: int, size: int, color: pygame.Color = TEXT, bold: bool = False) -> pygame.Rect:
     image = font(size, bold).render(text, True, color)
     return surface.blit(image, (x, y))
+
+
+def _draw_qr(surface: pygame.Surface, value: str, area: pygame.Rect) -> bool:
+    try:
+        import qrcode
+    except ImportError:
+        return False
+    code = qrcode.QRCode(border=2)
+    code.add_data(value)
+    code.make(fit=True)
+    matrix = code.get_matrix()
+    module = min(area.w, area.h) // len(matrix)
+    size = module * len(matrix)
+    target = pygame.Rect(0, 0, size, size)
+    target.center = area.center
+    pygame.draw.rect(surface, "white", target)
+    for row_index, row in enumerate(matrix):
+        for column_index, filled in enumerate(row):
+            if filled:
+                pygame.draw.rect(surface, "black", (target.x + column_index * module, target.y + row_index * module, module, module))
+    return True
 
 
 def render(surface: pygame.Surface, model: AppModel) -> None:
@@ -60,6 +85,14 @@ def render(surface: pygame.Surface, model: AppModel) -> None:
     _footer(surface, model)
     if model.pending_confirmation:
         _modal(surface, model)
+    elif model.overlay_pages:
+        _notes_modal(surface, model)
+
+
+def _visible_rows(model: AppModel) -> tuple[int, list[SettingRow]]:
+    rows = model.current_section.rows
+    start = min(max(0, model.row_index - 4), max(0, len(rows) - 5))
+    return start, rows[start : start + 5]
 
 
 def _header(surface: pygame.Surface, model: AppModel) -> None:
@@ -73,7 +106,7 @@ def _header(surface: pygame.Surface, model: AppModel) -> None:
     label(surface, str(model.row("device").value).upper(), 904, 39, 20, TEXT, True)
     web_requested = bool(model.row("web-access").value)
     web_running = web_requested and model.row("web-address").available
-    status = "WEB ON" if web_running else "WEB REQUEST" if web_requested else "LOCAL"
+    status = "WEB APP ON" if web_running else "WEB APP STARTING" if web_requested else "LOCAL"
     color = TEAL if web_running else AMBER
     pygame.draw.circle(surface, color, (1138 if web_requested else 1168, 43), 6)
     label(surface, status, 1150 if web_requested else 1180, 34, 14, color, True)
@@ -108,8 +141,10 @@ def _content(surface: pygame.Surface, model: AppModel) -> None:
 
     rows_x, rows_y, rows_w = x, 224, 590
     row_h = 78 if len(section.rows) > 4 else 94
-    for index, row in enumerate(section.rows):
-        y = rows_y + index * (row_h + 8)
+    first_row, visible_rows = _visible_rows(model)
+    for visible_index, row in enumerate(visible_rows):
+        index = first_row + visible_index
+        y = rows_y + visible_index * (row_h + 8)
         selected = model.rows_focused and index == model.row_index
         bg = PANEL_ALT if selected else PANEL
         pygame.draw.rect(surface, bg, (rows_x, y, rows_w, row_h), border_radius=5)
@@ -163,9 +198,14 @@ def _context(surface: pygame.Surface, model: AppModel, x: int, y: int, w: int, h
     label(surface, row.field_label, x + 22, line_y, 11, MUTED, True)
     line_y += 23
     value = row.field_value or ("ON" if row.kind is RowKind.TOGGLE and row.value else "OFF" if row.kind is RowKind.TOGGLE else str(row.value))
-    for value_line in context_value_lines(value.upper()):
-        label(surface, value_line, x + 22, line_y, 19, TEXT if row.available else DIM, True)
-        line_y += 23
+    value_size = 16 if row.qr_value or len(value) > 36 else 19
+    for value_line in context_value_lines(value.upper(), value_size, 2 if row.qr_value else 3):
+        label(surface, value_line, x + 22, line_y, value_size, TEXT if row.available else DIM, True)
+        line_y += value_size + 4
+
+    if row.qr_value:
+        label(surface, "SCAN TO PAIR", x + 22, y + h - 135, 11, MUTED, True)
+        _draw_qr(surface, row.qr_value, pygame.Rect(x + 86, y + h - 116, 105, 105))
 
     if not row.available:
         line_y += 48
@@ -186,7 +226,7 @@ def _footer(surface: pygame.Surface, model: AppModel) -> None:
         x += font(13, True).size(key)[0] + 9
         label(surface, meaning, x, 684, 11, MUTED, True)
         x += font(11, True).size(meaning)[0] + 34
-    label(surface, "PROTOTYPE · NO SYSTEM CHANGES", 1016, 684, 11, DIM, True)
+    label(surface, "CONTROL FREAK · LOCAL-FIRST", 1016, 684, 11, DIM, True)
 
 
 def _modal(surface: pygame.Surface, model: AppModel) -> None:
@@ -212,3 +252,20 @@ def _modal(surface: pygame.Surface, model: AppModel) -> None:
     pygame.draw.rect(surface, PANEL, (rect.x + 266, rect.bottom - 74, 236, 42), border_radius=4)
     pygame.draw.rect(surface, RULE, (rect.x + 266, rect.bottom - 74, 236, 42), 1, border_radius=4)
     label(surface, "B / ESC  CANCEL", rect.x + 285, rect.bottom - 63, 14, TEXT, True)
+
+
+def _notes_modal(surface: pygame.Surface, model: AppModel) -> None:
+    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    overlay.fill((2, 8, 12, 208))
+    surface.blit(overlay, (0, 0))
+    rect = pygame.Rect(292, 120, 696, 480)
+    pygame.draw.rect(surface, PANEL_ALT, rect, border_radius=8)
+    pygame.draw.rect(surface, AMBER, rect, 2, border_radius=8)
+    label(surface, "VERIFIED OFFLINE RELEASE NOTES", rect.x + 34, rect.y + 28, 12, AMBER, True)
+    label(surface, model.overlay_title, rect.x + 34, rect.y + 58, 27, TEXT, True)
+    y = rect.y + 108
+    for line in model.overlay_pages[model.overlay_page]:
+        label(surface, line, rect.x + 34, y, 16, MUTED)
+        y += 25
+    label(surface, f"PAGE {model.overlay_page + 1} / {len(model.overlay_pages)}", rect.x + 34, rect.bottom - 48, 12, MUTED, True)
+    label(surface, "← →  PAGE    A / B  CLOSE", rect.right - 292, rect.bottom - 51, 13, TEXT, True)

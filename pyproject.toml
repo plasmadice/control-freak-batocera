@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "control-freak-batocera"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Controller-first settings and management for Batocera"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"
 license = "GPL-3.0-or-later"
-dependencies = ["pygame-ce>=2.5,<3"]
+dependencies = ["pygame-ce>=2.5,<3", "qrcode>=7.4,<9"]
 
 [project.optional-dependencies]
 dev = ["pytest>=9,<10"]

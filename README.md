@@ -1,43 +1,40 @@
 # Control Freak
 
-A controller-first settings and management application for Batocera.
+Control Freak is a controller-first local settings and management application for Batocera. The primary interface is a full-screen Pygame application launched from EmulationStation; the optional authenticated web interface is disabled by default.
 
-Control Freak is being rebuilt as a local Batocera application rather than a remote fleet dashboard. The primary interface is a full-screen Pygame application launched from EmulationStation. An optional authenticated web interface will use the same local service and remain disabled by default.
+Control Freak is an independent community project. It is not affiliated with, endorsed by, or supported by Batocera.linux or GitHub.
 
-> [!IMPORTANT]
-> This repository currently contains a fixture-backed interaction prototype. It does **not** mutate Batocera settings yet.
+## Current functionality
 
-## Prototype scope
+- controller navigation using Batocera's EmulationStation mappings (South confirms, East goes back; Start/Select do nothing)
+- authenticated local Web app and optional existing-tailnet access
+- persistent audio-output blacklist enforcement without changing physical audio configuration
+- Batocera service enablement and lifecycle management
+- anonymous signed updates from public GitHub Releases, authenticated offline release notes, and one verified rollback target
 
-- 1280×720 logical canvas that scales to the active display
-- controller/keyboard semantic navigation
-- settings index and contextual help
-- read-only, toggle, choice, action, unavailable, error, and confirmation states
-- fixture screens for overview, display/audio, network/web, updates, rollback, diagnostics, and system actions
-- deterministic screenshot rendering for visual review
+## Compatibility
+
+The current release format requires Python 3.12 through 3.14, OpenSSL, `qrcode`, `pygame-ce`, Linux `memfd` sealing, and Batocera's `batocera-services`/`start-stop-daemon` environment. Each signed release metadata file lists the exact supported two-digit Batocera versions; the updater refuses an incompatible release. Hardware compatibility still depends on Batocera's SDL, display, PulseAudio, and controller support.
 
 ## Batocera installation
 
-The repository includes a manifest-driven installer. It registers Control Freak under Batocera's `pygame` system and keeps immutable releases below `/userdata/roms/pygame/control-freak/releases`, selected through an atomic `current.json` pointer.
+The Web app uses a persistent device-local self-signed HTTPS certificate. Browsers will warn until that certificate is explicitly trusted; HTTPS encrypts pairing and session credentials, but accepting an unverified certificate does not authenticate the device against an active first-use network attacker.
+
+The manifest-driven installer creates a dedicated `controlfreak` EmulationStation system. Immutable releases live below root-owned `/userdata/system/control-freak/app/releases`; an atomic `current.json` selects the active release. Its library contains only an inert `.controlfreak` marker, metadata, and artwork. Nothing executable is installed below `/userdata/roms`.
 
 ```bash
-python3 deploy/install_batocera.py \
-  --source . \
-  --release-id 0.1.0-dev-<revision> \
-  --channel stable
+python3 deploy/install_batocera.py --source . --release-id 0.1.0 --channel stable
 ```
 
-Reinstall the exact release after verifying the current managed files have not drifted:
+The root-owned EmulationStation overlay invokes `/userdata/system/services/control_freak launch` directly. The application, overlay, library metadata, and service wrapper must be root-owned, non-symlinked, and not group/world writable. Cryptographic verification starts in the service wrapper, which verifies the signed runtime before executing it. The installer migrates the former `/userdata/roms/pygame/control-freak` layout and removes only its owned legacy gamelist entry.
 
-```bash
-python3 deploy/install_batocera.py \
-  --source . \
-  --release-id 0.1.0-dev-<revision> \
-  --channel stable \
-  --force
-```
+## Updates
 
-The Updates screen exposes separate stable and nightly actions. In this private prototype they select only operator-staged releases; network release discovery is intentionally not implemented yet.
+The Updates screen supports Stable and Nightly channels. Manual checks always perform fresh discovery and require confirmation before installation. Daily checks only mark availability. Installed release notes are cached with their detached signature and remain available offline. Rollback is shown only when the installer can completely verify a retained predecessor.
+
+Public discovery is credential-free at `plasmadice/control-freak-batocera` GitHub Releases. Forgejo remains the authoritative source repository; GitHub is a public mirror/publication endpoint. GitHub API fields and GitHub-rendered notes are never security authority—the pinned project key authenticates canonical metadata that binds the artifact, compatibility, notes, and runtime trust statement.
+
+See [RELEASING.md](RELEASING.md) for deterministic build/sign/publish steps and [SECURITY.md](SECURITY.md) for the trust model.
 
 ## Run locally
 
@@ -48,25 +45,13 @@ python3 -m venv .venv
 .venv/bin/control-freak --windowed
 ```
 
-Render the review fixture without opening a window:
-
-```bash
-SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
-  .venv/bin/control-freak --screenshot artifacts/control-freak-network.png
-```
-
-## Current controls
+## Controls
 
 - D-pad / arrow keys: move
-- `A` / Enter / Space: select
-- `B` / Escape / Backspace: back
-
-The shipping implementation will translate Batocera's existing EmulationStation mappings. It will not add a controller-remapping workflow.
-
-## Deliberately absent
-
-No fleet hub, cross-machine transfer queue, controller mapper, public-internet exposure, plugin system, theming system, or live Batocera mutation layer exists in this first spike.
+- South / Enter / Space: confirm
+- East / Escape / Backspace: back
+- Start and Select: no action
 
 ## License
 
-GPL-3.0-or-later. The product name is provisional pending public-release name clearance.
+GPL-3.0-or-later.

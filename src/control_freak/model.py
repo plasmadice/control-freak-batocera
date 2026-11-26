@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
+import ipaddress
+import textwrap
 from typing import Any
 
 
@@ -35,6 +37,7 @@ class SettingRow:
     confirm: str = ""
     field_label: str = "CURRENT"
     field_value: str | None = None
+    qr_value: str | None = None
 
 
 @dataclass
@@ -64,6 +67,10 @@ class AppModel:
     web_address: str = ""
     web_runtime_available: bool = False
     tailscale_address: str | None = None
+    web_token: str = ""
+    overlay_title: str = ""
+    overlay_pages: list[list[str]] = field(default_factory=list)
+    overlay_page: int = 0
 
     @property
     def current_section(self) -> Section:
@@ -90,7 +97,46 @@ class AppModel:
                     return
         raise KeyError(row_id)
 
+    def show_overlay(self, title: str, text: str) -> None:
+        lines = [line for paragraph in text.splitlines() for line in (textwrap.wrap(paragraph, width=58) or [""])]
+        self.overlay_title = title
+        self.overlay_pages = [lines[index:index + 11] for index in range(0, len(lines), 11)] or [[""]]
+        self.overlay_page = 0
+
+    def sync_web(self, enabled: bool, tailscale_enabled: bool, runtime_available: bool, token: str) -> None:
+        self.web_runtime_available = runtime_available
+        self.web_token = token
+        web = self.row("web-access")
+        web.value = enabled
+        address = self.row("web-address")
+        address.available = enabled and runtime_available and bool(self.web_address)
+        address.value = self.web_address if address.available else "Unavailable" if enabled else "Not running"
+        address.qr_value = f"{self.web_address}/pair?token={token}" if address.available and token else None
+        address.reason = "" if address.available else "No usable LAN address is available." if enabled and runtime_available else "The Web app did not start." if enabled else "Enable the Web app first."
+        tailscale = self.row("tailscale")
+        tailscale.available = enabled and runtime_available and self.tailscale_address is not None
+        tailscale.value = bool(tailscale_enabled and tailscale.available)
+        tailscale.reason = (
+            "" if tailscale.available
+            else "The Web app did not start." if enabled and not runtime_available
+            else "Tailscale is not installed or connected on this machine." if self.tailscale_address is None
+            else "The Web app must be enabled first."
+        )
+        tailscale_address = self.row("tailscale-address")
+        tailscale_address.available = bool(tailscale.value)
+        tailscale_address.value = f"https://{self.tailscale_address}:8787" if tailscale.value else "Hidden"
+        tailscale_address.qr_value = f"{tailscale_address.value}/pair?token={token}" if tailscale.value and token else None
+        tailscale_address.reason = "" if tailscale.value else "Enable Tailscale access to show this address."
+
     def dispatch(self, action: Action) -> None:
+        if self.overlay_pages:
+            if action in (Action.BACK, Action.SELECT):
+                self.overlay_pages = []
+            elif action in (Action.DOWN, Action.RIGHT):
+                self.overlay_page = min(len(self.overlay_pages) - 1, self.overlay_page + 1)
+            elif action in (Action.UP, Action.LEFT):
+                self.overlay_page = max(0, self.overlay_page - 1)
+            return
         if self.pending_confirmation:
             if action is Action.SELECT:
                 row = self.row(self.pending_confirmation.row_id)
@@ -135,7 +181,9 @@ class AppModel:
         if row.confirm:
             message = row.confirm
             if row.id == "web-access" and bool(row.value):
-                message = "Disable web access? Browser sessions will disconnect, but local settings will remain available here."
+                message = "Disable the Web app? Browser sessions will disconnect, but local settings will remain available here."
+            elif row.id == "batocera-service" and bool(row.value):
+                message = "Disable the Batocera service? The Web app and background audio-output blacklist enforcement will stop. The local Control Freak app will remain available."
             self.pending_confirmation = Confirmation(row.id, row.label, message)
             return
         self._apply(row)
@@ -144,32 +192,9 @@ class AppModel:
         if row.kind is RowKind.TOGGLE:
             row.value = not bool(row.value)
             if row.id == "web-access":
-                enabled = bool(row.value)
-                address = self.row("web-address")
-                address.available = enabled and self.web_runtime_available
-                address.value = self.web_address if address.available else "Unavailable" if enabled else "Not running"
-                address.reason = "" if address.available else "Web service is not available in this build." if enabled else "Enable Web access first."
-                tailscale = self.row("tailscale")
-                tailscale.available = enabled and self.web_runtime_available and self.tailscale_address is not None
-                tailscale.reason = (
-                    "" if tailscale.available
-                    else "Web service is not available in this build."
-                    if enabled and not self.web_runtime_available
-                    else "Tailscale is not installed or connected on this machine."
-                    if self.tailscale_address is None
-                    else "Web access must be enabled first."
-                )
-                if not enabled:
-                    tailscale.value = False
-                tailscale_address = self.row("tailscale-address")
-                tailscale_address.available = False
-                tailscale_address.value = "Hidden"
-                tailscale_address.reason = "Enable Tailscale access to show this address."
+                self.sync_web(bool(row.value), False, self.web_runtime_available, self.web_token)
             elif row.id == "tailscale":
-                address = self.row("tailscale-address")
-                address.available = bool(row.value)
-                address.value = f"http://{self.tailscale_address}:8787" if row.value else "Hidden"
-                address.reason = "" if row.value else "Enable Tailscale access to show this address."
+                self.sync_web(bool(self.row("web-access").value), bool(row.value), self.web_runtime_available, self.web_token)
         elif row.kind is RowKind.CHOICE and row.choices:
             index = row.choices.index(str(row.value))
             row.value = row.choices[(index + 1) % len(row.choices)]
@@ -184,11 +209,45 @@ def build_fixture_model(
     tailscale_installed: bool = False,
     tailscale_address: str | None = None,
     web_runtime_available: bool = False,
+    web_token: str = "",
+    web_enabled: bool = False,
+    tailscale_enabled: bool = False,
     installed_version: str = "0.1.0-dev",
+    update_channel: str = "stable",
+    check_updates_daily: bool = True,
+    update_status: str = "Check now",
+    update_release: str | None = None,
+    notes_available: bool = False,
+    previous_version: str | None = None,
+    service_enabled: bool = True,
+    audio_outputs: list[dict[str, str]] | None = None,
+    blocked_audio: list[str] | None = None,
 ) -> AppModel:
+    try:
+        lan_address = str(ipaddress.IPv4Address(ip_address))
+    except ipaddress.AddressValueError:
+        lan_address = ""
     if tailscale_installed and tailscale_address is None:
         tailscale_address = "100.64.0.10"
-    return AppModel(
+    try:
+        if ipaddress.IPv4Address(tailscale_address or "") not in ipaddress.IPv4Network("100.64.0.0/10"):
+            tailscale_address = None
+    except ipaddress.AddressValueError:
+        tailscale_address = None
+    blocked = set(blocked_audio or [])
+    audio_rows = [
+        SettingRow(
+            f"audio-block:{item['value']}",
+            f"Block audio output {index}",
+            "Desired blacklist policy. Background mute enforcement can fail independently.",
+            RowKind.TOGGLE,
+            item["value"] in blocked,
+            field_label="OUTPUT",
+            field_value=item["label"],
+        )
+        for index, item in enumerate(audio_outputs or [], 1)
+    ]
+    model = AppModel(
         sections=[
             Section(
                 "overview",
@@ -196,9 +255,6 @@ def build_fixture_model(
                 "Current machine state and the few things that need attention.",
                 [
                     SettingRow("device", "Machine", "The Batocera system currently running Control Freak.", RowKind.READONLY, device_name),
-                    SettingRow("health", "System health", "Core services are responding and persistent storage is writable.", RowKind.READONLY, "Healthy", level="good"),
-                    SettingRow("storage", "Userdata storage", "Available capacity on /userdata.", RowKind.READONLY, "184 GB free"),
-
                 ],
             ),
             Section(
@@ -206,9 +262,7 @@ def build_fixture_model(
                 "Display & Audio",
                 "Cabinet-facing output settings with the active value always visible.",
                 [
-
-                    SettingRow("audio-output", "Audio output", "Cycle through outputs detected by Batocera.", RowKind.CHOICE, "HDMI", ("HDMI", "Analog", "Auto")),
-                    SettingRow("volume", "System volume", "The master volume managed by Batocera.", RowKind.CHOICE, "80%", ("60%", "70%", "80%", "90%", "100%")),
+                    *audio_rows,
                     SettingRow("crt-mode", "CRT output profile", "Requires a compatible analog video configuration.", RowKind.CHOICE, "Off", ("Off",), False, "No compatible CRT profile was detected."),
                 ],
             ),
@@ -220,15 +274,15 @@ def build_fixture_model(
                     SettingRow("network-status", "Network", "Current local connection and address.", RowKind.READONLY, f"{connection_type} · {ip_address}" if ip_address != "Offline" else "Offline", level="good"),
                     SettingRow(
                         "web-access",
-                        "Web access",
-                        "Run the optional Control Freak web interface on this machine. Core settings remain available here when it is off.",
+                        "Web app",
+                        "Run the optional Control Freak browser interface on this machine. Core settings remain available here when it is off.",
                         RowKind.TOGGLE,
                         False,
-                        confirm="Enable authenticated web access on the local network? You can turn it off here at any time.",
+                        confirm="Enable the authenticated Web app on the local network? You can turn it off here at any time.",
                     ),
-                    SettingRow("web-address", "Web address", "Shown after web access starts successfully.", RowKind.READONLY, "Not running", available=False, reason="Enable Web access first."),
-                    SettingRow("tailscale", "Tailscale access", "Allow the web interface on the existing tailnet without making it public.", RowKind.TOGGLE, False, available=False, reason="Tailscale is not installed or connected on this machine." if tailscale_address is None else "Web access must be enabled first."),
-                    SettingRow("tailscale-address", "Tailscale address", "Shown only while Tailscale access is enabled.", RowKind.READONLY, "Hidden", available=False, reason="Enable Tailscale access to show this address."),
+                    SettingRow("web-address", "Web address", "Shown with a pairing QR code after the Web app starts successfully.", RowKind.READONLY, "Not running", available=False, reason="Enable the Web app first."),
+                    SettingRow("tailscale", "Tailscale access", "Allow the Web app on the existing tailnet without making it public.", RowKind.TOGGLE, False, available=False, reason="Tailscale is not installed or connected on this machine." if tailscale_address is None else "The Web app must be enabled first."),
+                    SettingRow("tailscale-address", "Tailscale address", "Shown with a pairing QR code only while Tailscale access is enabled.", RowKind.READONLY, "Hidden", available=False, reason="Enable Tailscale access to show this address."),
                 ],
             ),
             Section(
@@ -237,10 +291,20 @@ def build_fixture_model(
                 "Release channel, installed version, and a safe path back.",
                 [
                     SettingRow("installed-version", "Installed version", "The immutable application release currently active.", RowKind.READONLY, installed_version),
-                    SettingRow("update-status", "Update status", "No release feed is configured in this build.", RowKind.READONLY, "Not checked"),
-                    SettingRow("install-stable", "Install stable update", "Install the newest operator-staged stable release. Stable remains the default channel.", RowKind.ACTION, "Staged release", confirm="Install the staged stable release and use it on the next launch?", field_label="RELEASE ACTION", field_value="INSTALL STAGED STABLE"),
-                    SettingRow("install-nightly", "Install nightly update", "Install the newest operator-staged nightly build. Nightly may contain incomplete behavior.", RowKind.ACTION, "Staged release", confirm="Install the staged nightly release and switch this machine to the nightly channel?", field_label="RELEASE ACTION", field_value="INSTALL STAGED NIGHTLY"),
-                    SettingRow("rollback", "Roll back", "Restore the previously installed verified release.", RowKind.ACTION, "Unavailable", available=False, reason="No previous release is stored on this machine."),
+                    SettingRow("update-channel", "Update channel", "Stable receives tested releases. Nightly receives newer changes sooner, with less testing.", RowKind.CHOICE, "Nightly" if update_channel == "nightly" else "Stable", choices=("Stable", "Nightly")),
+                    SettingRow("check-updates-daily", "Check for updates daily", "Check the public signed release feed once per day. Daily checks never install.", RowKind.TOGGLE, check_updates_daily),
+                    SettingRow("check-updates", "Check for updates", "Discover a signed release now. Installation requires a separate confirmation.", RowKind.ACTION, f"{update_release} available" if update_release else update_status, field_label="UPDATE ACTION", field_value="CHECK FOR UPDATES"),
+                    SettingRow("whats-new", "What's new in this version", "Show authenticated release notes cached with the installed version.", RowKind.ACTION, "View notes" if notes_available else "Unavailable", available=notes_available, reason="" if notes_available else "This installed release has no verified offline release notes."),
+                    SettingRow(
+                        "rollback",
+                        "Go back to the previous version",
+                        "Restore the previous verified version. The current version is retained so this can be undone.",
+                        RowKind.ACTION,
+                        previous_version or "Unavailable",
+                        available=previous_version is not None,
+                        reason="" if previous_version is not None else "No previous version is stored on this machine.",
+                        confirm=f"Go back to {previous_version}? The current version will become the previous version." if previous_version else "",
+                    ),
                 ],
             ),
             Section(
@@ -248,12 +312,14 @@ def build_fixture_model(
                 "System",
                 "Diagnostics and carefully bounded machine actions.",
                 [
-                    SettingRow("diagnostics", "Export diagnostics", "Create a support archive that excludes credentials and game content.", RowKind.ACTION, "Create archive"),
-
+                    SettingRow("batocera-service", "Batocera service", "Start Control Freak automatically with Batocera. This keeps the Web app and audio-output blacklist enforcement available in the background.", RowKind.TOGGLE, service_enabled, confirm="Enable the Control Freak Batocera service at startup?"),
                 ],
             ),
         ],
-        web_address=f"http://{ip_address}:8787",
+        web_address=f"https://{lan_address}:8787" if lan_address else "",
         web_runtime_available=web_runtime_available,
         tailscale_address=tailscale_address,
+        web_token=web_token,
     )
+    model.sync_web(web_enabled, tailscale_enabled, web_runtime_available, web_token)
+    return model

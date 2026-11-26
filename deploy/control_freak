@@ -1,0 +1,481 @@
+#!/usr/bin/python3 -I
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import select
+import signal
+import stat
+import subprocess
+import sys
+import time
+import zipfile
+
+APP = Path("/userdata/system/control-freak/app")
+STATE = Path("/userdata/system/control-freak")
+PIDFILE = STATE / "web.pid"
+LOG = "web.log"
+PYTHON = "/usr/bin/python3"
+START_STOP_DAEMON = "/sbin/start-stop-daemon"
+SERVICE_CODE = "import os,runpy,sys;sys.path.insert(0,'/proc/self/fd/'+os.environ['CONTROL_FREAK_BUNDLE_FD']);runpy.run_module('control_freak.service',run_name='__main__')"
+COMMAND = (PYTHON, "-I", "-B", "-c", SERVICE_CODE)
+STATIC_MODES = {"image.png": 0o644, **{f"logo-proposal-{number}.png": 0o644 for number in range(1, 7)}, "install_batocera.py": 0o644}
+SHA256 = re.compile(r"[0-9a-f]{64}")
+PUBLIC_KEY_PEM = b"__CONTROL_FREAK_RELEASE_PUBLIC_KEY__"
+OPENSSL = "/usr/bin/openssl"
+TRUST_STATEMENT = "trust.json"
+TRUST_SIGNATURE = "trust.sig"
+LIFECYCLE_LOCK = ".control-freak.lock"
+
+
+def verify_signature(statement: bytes, signature: bytes) -> None:
+    descriptors = []
+    try:
+        for name, data in (("control-freak-public-key", PUBLIC_KEY_PEM), ("control-freak-signature", signature)):
+            descriptor = os.memfd_create(name, os.MFD_ALLOW_SEALING)
+            os.write(descriptor, data)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE)
+            descriptors.append(descriptor)
+        result = subprocess.run(
+            (OPENSSL, "dgst", "-sha256", "-verify", f"/proc/self/fd/{descriptors[0]}", "-signature", f"/proc/self/fd/{descriptors[1]}"),
+            input=statement,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            pass_fds=tuple(descriptors),
+            check=False,
+        )
+        if result.returncode:
+            raise RuntimeError("Unauthenticated Control Freak release")
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def update_key_fd() -> int:
+    descriptor = os.memfd_create("control-freak-update-key", os.MFD_ALLOW_SEALING)
+    os.write(descriptor, PUBLIC_KEY_PEM)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE)
+    return descriptor
+
+
+def open_state() -> int:
+    parts = STATE.parts
+    if not STATE.is_absolute() or len(parts) < 2:
+        raise RuntimeError("Invalid Control Freak state path")
+    directory_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for index, part in enumerate(parts[1:], start=1):
+            try:
+                child_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            except FileNotFoundError:
+                if index != len(parts) - 1:
+                    raise RuntimeError("Missing Control Freak state parent")
+                os.mkdir(part, 0o700, dir_fd=directory_fd)
+                child_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        directory_info = os.fstat(directory_fd)
+        if not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.geteuid() or directory_info.st_mode & 0o777 != 0o700:
+            raise RuntimeError("Unsafe Control Freak state directory")
+        return directory_fd
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def lifecycle_lock(directory_fd: int) -> int:
+    inherited = os.environ.get("CONTROL_FREAK_LIFECYCLE_FD")
+    if inherited is None:
+        lock_fd = os.open(LIFECYCLE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+    else:
+        try:
+            lock_fd = int(inherited)
+            held = os.fstat(lock_fd)
+            expected = os.stat(LIFECYCLE_LOCK, dir_fd=directory_fd, follow_symlinks=False)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Invalid inherited lifecycle lock") from exc
+        if (held.st_dev, held.st_ino) != (expected.st_dev, expected.st_ino):
+            raise RuntimeError("Invalid inherited lifecycle lock")
+    info = os.fstat(lock_fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+        if inherited is None:
+            os.close(lock_fd)
+        raise RuntimeError("Invalid lifecycle lock")
+    os.fchmod(lock_fd, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    return lock_fd
+
+
+def checksum(path: Path) -> str:
+    digest = hashlib.sha256()
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1048576), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_wrapper() -> bytes:
+    data = Path(__file__).read_bytes()
+    replacements = {
+        f"APP = Path({str(APP)!r})".encode(): b"APP = Path(" + b'"/userdata/system/control-freak/app")',
+        f"STATE = Path({str(STATE)!r})".encode(): b"STATE = Path(" + b'"/userdata/system/control-freak")',
+    }
+    for current, canonical in replacements.items():
+        if data.count(current) != 1:
+            raise RuntimeError("Invalid Control Freak service wrapper")
+        data = data.replace(current, canonical)
+    return data
+
+
+def release_metadata(root: Path, name: str) -> bytes:
+    fd = os.open(root / name, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o777 != 0o444:
+            raise RuntimeError("Invalid Control Freak release metadata")
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            return handle.read()
+    finally:
+        os.close(fd)
+
+
+def validated_release() -> tuple[str, int]:
+    current = json.loads((APP / "current.json").read_text())
+    manifest = json.loads((APP / "install-manifest.json").read_text())
+    release = current.get("release_id")
+    static = manifest.get("static")
+    service = manifest.get("service")
+    registration = manifest.get("registration")
+    releases = manifest.get("releases")
+    if (
+        set(current) != {"version", "release_id", "channel"} or type(current.get("version")) is not int or current["version"] != 1
+        or type(release) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", release)
+        or current.get("channel") not in {"stable", "nightly"}
+        or set(manifest) != {"version", "static", "service", "registration", "releases"} or type(manifest.get("version")) is not int or manifest["version"] != 6
+        or not isinstance(static, dict) or set(static) != set(STATIC_MODES) or any(type(value) is not str or not SHA256.fullmatch(value) for value in static.values())
+        or not isinstance(releases, list) or release not in releases or any(type(value) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", value) for value in releases) or len(releases) != len(set(releases))
+        or not isinstance(service, dict) or set(service) != {"name", "sha256", "mode"} or service.get("name") != "control_freak" or type(service.get("sha256")) is not str or not SHA256.fullmatch(service["sha256"]) or type(service.get("mode")) is not int or service["mode"] != 0o755
+        or not isinstance(registration, dict) or set(registration) != {"overlay", "marker", "gamelist", "image"}
+        or any(not isinstance(item, dict) or set(item) != {"sha256", "mode"} or type(item.get("sha256")) is not str or not SHA256.fullmatch(item["sha256"]) or item.get("mode") != 0o644 for item in registration.values())
+    ):
+        raise RuntimeError("Invalid Control Freak installation")
+    wrapper = Path(__file__)
+    wrapper_info = wrapper.lstat()
+    if not stat.S_ISREG(wrapper_info.st_mode) or wrapper_info.st_uid != os.geteuid() or wrapper_info.st_mode & 0o777 != service["mode"] or checksum(wrapper) != service["sha256"]:
+        raise RuntimeError("Modified Control Freak service wrapper")
+    for name, mode in STATIC_MODES.items():
+        target = APP / name
+        if target.is_symlink() or not target.is_file() or target.stat().st_mode & 0o777 != mode or checksum(target) != static[name]:
+            raise RuntimeError("Modified Control Freak installation")
+    userdata = APP.parents[2]
+    library = userdata / "system/control-freak/library"
+    registration_paths = {
+        "overlay": userdata / "system/configs/emulationstation/es_systems_control_freak.cfg",
+        "marker": library / "Control Freak.controlfreak",
+        "gamelist": library / "gamelist.xml",
+        "image": library / "images/control-freak.png",
+    }
+    for name, target in registration_paths.items():
+        try:
+            info = target.lstat()
+        except OSError as exc:
+            raise RuntimeError("Modified Control Freak registration") from exc
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o777 != registration[name]["mode"] or checksum(target) != registration[name]["sha256"]:
+            raise RuntimeError("Modified Control Freak registration")
+    root = APP / "releases" / release
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError("Invalid Control Freak release directory")
+    release_manifest = json.loads((root / "manifest.json").read_text())
+    if set(release_manifest) != {"version", "release_id", "files"} or type(release_manifest.get("version")) is not int or release_manifest["version"] != 1 or release_manifest.get("release_id") != release or not isinstance(release_manifest.get("files"), list):
+        raise RuntimeError("Invalid Control Freak release")
+    expected = {"manifest.json", TRUST_STATEMENT, TRUST_SIGNATURE}
+    expected_directories: set[str] = set()
+    bundle: list[tuple[str, bytes]] = []
+    for item in release_manifest["files"]:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256", "mode"} or type(item.get("path")) is not str or type(item.get("sha256")) is not str or not SHA256.fullmatch(item["sha256"]) or type(item.get("mode")) is not int or not 0 <= item["mode"] <= 0o777:
+            raise RuntimeError("Invalid Control Freak release")
+        relative = Path(item["path"])
+        if relative.is_absolute() or ".." in relative.parts or relative.as_posix() in expected:
+            raise RuntimeError("Invalid Control Freak release")
+        target = root / relative
+        try:
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                data = handle.read()
+        except OSError as exc:
+            raise RuntimeError("Modified Control Freak release") from exc
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o777 != item["mode"] or hashlib.sha256(data).hexdigest() != item["sha256"]:
+            raise RuntimeError("Modified Control Freak release")
+        expected.add(relative.as_posix())
+        expected_directories.update(parent.as_posix() for parent in relative.parents if parent.as_posix() != ".")
+        bundle.append((relative.as_posix(), data))
+    statement = release_metadata(root, TRUST_STATEMENT)
+    signature = release_metadata(root, TRUST_SIGNATURE)
+    try:
+        trust = json.loads(statement)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Invalid Control Freak release trust statement") from exc
+    service_trust = trust.get("service") if isinstance(trust, dict) else None
+    source_trust = trust.get("source") if isinstance(trust, dict) else None
+    if (
+        not isinstance(trust, dict)
+        or set(trust) != {"version", "files", "service", "source"}
+        or type(trust.get("version")) is not int
+        or trust["version"] != 2
+        or trust.get("files") != release_manifest["files"]
+        or not isinstance(service_trust, dict)
+        or set(service_trust) != {"sha256", "mode"}
+        or type(service_trust.get("sha256")) is not str
+        or not SHA256.fullmatch(service_trust["sha256"])
+        or type(service_trust.get("mode")) is not int
+        or service_trust["mode"] != 0o755
+        or not isinstance(source_trust, list)
+        or any(not isinstance(item, dict) or set(item) != {"path", "sha256", "mode"} or type(item.get("path")) is not str or type(item.get("sha256")) is not str or not SHA256.fullmatch(item["sha256"]) or type(item.get("mode")) is not int for item in source_trust)
+    ):
+        raise RuntimeError("Release trust statement does not match payload")
+    verify_signature(statement, signature)
+    source_hashes = {item["path"]: item["sha256"] for item in source_trust}
+    if len(source_hashes) != len(source_trust) or source_hashes.get("deploy/install_batocera.py") != static["install_batocera.py"] or source_hashes.get("assets/control-freak-image.png") != registration["image"]["sha256"]:
+        raise RuntimeError("Release trust statement does not match installed payload")
+    if hashlib.sha256(canonical_wrapper()).hexdigest() != service_trust["sha256"]:
+        raise RuntimeError("Modified Control Freak service wrapper")
+    actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and not path.is_symlink()}
+    actual_directories = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_dir() and not path.is_symlink()}
+    if actual != expected or actual_directories != expected_directories or any(path.is_symlink() or not (path.is_file() or path.is_dir()) for path in root.rglob("*")):
+        raise RuntimeError("Unknown Control Freak release object")
+    bundle_fd = os.memfd_create("control-freak-release", os.MFD_ALLOW_SEALING)
+    with zipfile.ZipFile(os.fdopen(os.dup(bundle_fd), "wb"), "w") as archive:
+        for name, data in bundle:
+            archive.writestr(name, data)
+    os.lseek(bundle_fd, 0, os.SEEK_SET)
+    fcntl.fcntl(bundle_fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE)
+    return release, bundle_fd
+
+
+def open_log(directory_fd: int) -> int:
+    try:
+        info = os.stat(LOG, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("Unsafe Control Freak log")
+        if info.st_size > 1048576:
+            os.replace(LOG, f"{LOG}.1", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    except FileNotFoundError:
+        pass
+    return os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+
+
+def daemon(action: str) -> int:
+    command = [START_STOP_DAEMON, action, "-p", str(PIDFILE), "-x", PYTHON]
+    environment = None
+    if action == "-S":
+        command += ["-a", str(Path(__file__)), "-b", "-m", "-O", str(STATE / LOG), "--", "worker"]
+        environment = os.environ.copy()
+        environment["CONTROL_FREAK_WORKER"] = "1"
+    return subprocess.run(command, check=False, env=environment).returncode
+
+
+def owned_pid() -> tuple[int, int] | None:
+    pidfd = None
+    try:
+        fd = os.open(PIDFILE, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    try:
+        with os.fdopen(fd, "r") as handle:
+            pid = int(handle.read().strip())
+        try:
+            pidfd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return None
+        expected = b"\0".join(part.encode() for part in COMMAND) + b"\0"
+        if os.stat(f"/proc/{pid}").st_uid != os.geteuid():
+            raise RuntimeError
+        if os.path.realpath(f"/proc/{pid}/exe") != os.path.realpath(PYTHON):
+            raise RuntimeError
+        if Path(f"/proc/{pid}/cmdline").read_bytes() != expected:
+            raise RuntimeError
+        return pid, pidfd
+    except (OSError, ValueError, RuntimeError) as exc:
+        if pidfd is not None:
+            os.close(pidfd)
+        raise RuntimeError("Invalid Control Freak PID evidence") from exc
+
+
+def _close_owned(record: tuple[int, int] | None) -> None:
+    if record is not None:
+        os.close(record[1])
+
+
+def stop_owned(record: tuple[int, int]) -> int:
+    pid, pidfd = record
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+        if not poller.poll(20_000):
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+            if not poller.poll(5_000):
+                return 1
+        try:
+            if int(PIDFILE.read_text().strip()) == pid:
+                PIDFILE.unlink()
+        except (FileNotFoundError, ValueError):
+            pass
+        return 0
+    except ProcessLookupError:
+        return 0
+    finally:
+        os.close(pidfd)
+
+
+def start() -> int:
+    record = owned_pid()
+    if record is not None:
+        _close_owned(record)
+        return 0
+    try:
+        PIDFILE.unlink()
+    except FileNotFoundError:
+        pass
+    if daemon("-S"):
+        return 1
+    deadline = time.monotonic() + 3
+    ready_since = None
+    while time.monotonic() < deadline:
+        try:
+            record = owned_pid()
+        except RuntimeError:
+            ready_since = None
+            time.sleep(0.05)
+            continue
+        if record is None:
+            ready_since = None
+        elif ready_since is None:
+            ready_since = time.monotonic()
+        elif time.monotonic() - ready_since >= 0.5:
+            _close_owned(record)
+            return 0
+        _close_owned(record)
+        time.sleep(0.05)
+    try:
+        record = owned_pid()
+    except RuntimeError:
+        return 1
+    if record is not None:
+        stop_owned(record)
+    try:
+        PIDFILE.unlink()
+    except FileNotFoundError:
+        pass
+    return 1
+
+
+def reject_lockout(directory_fd: int) -> None:
+    try:
+        lockout_fd = os.open("runtime.lockout", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return
+    with os.fdopen(lockout_fd, "rb") as handle:
+        if handle.read() != b'{"version": 1}\n':
+            raise RuntimeError("Invalid Control Freak runtime lockout")
+    raise RuntimeError("Control Freak runtime is locked out")
+
+
+def worker() -> None:
+    if os.environ.pop("CONTROL_FREAK_WORKER", None) != "1":
+        raise RuntimeError("Unauthorized Control Freak worker invocation")
+    directory_fd = open_state()
+    try:
+        reject_lockout(directory_fd)
+        try:
+            pid_fd = os.open(PIDFILE.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            with os.fdopen(pid_fd, "r") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022 or int(handle.read().strip()) != os.getpid():
+                    raise RuntimeError
+        except (FileNotFoundError, OSError, ValueError, RuntimeError) as exc:
+            raise RuntimeError("Unauthorized Control Freak worker invocation") from exc
+    finally:
+        os.close(directory_fd)
+    _release, bundle_fd = validated_release()
+    os.set_inheritable(bundle_fd, True)
+    environment = os.environ.copy()
+    environment["CONTROL_FREAK_BUNDLE_FD"] = str(bundle_fd)
+    environment["XDG_RUNTIME_DIR"] = "/var/run"
+    os.execve(PYTHON, COMMAND, environment)
+
+
+def main() -> int:
+    action = sys.argv[1] if len(sys.argv) == 2 else "launch" if len(sys.argv) == 1 else ""
+    if action not in {"start", "stop", "status", "launch", "restore-audio", "worker"}:
+        print(f"usage: {sys.argv[0]} {{start|stop|status|launch|restore-audio}}", file=sys.stderr)
+        return 2
+    if action == "worker":
+        worker()
+        return 1
+    directory_fd = open_state()
+    lifecycle_fd = lifecycle_lock(directory_fd)
+    try:
+        if action in {"launch", "restore-audio"}:
+            lock_fd = os.open("web.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                reject_lockout(directory_fd)
+                _release, bundle_fd = validated_release()
+                key_fd = update_key_fd()
+            finally:
+                os.close(lock_fd)
+            environment = os.environ.copy()
+            environment.pop("CONTROL_FREAK_LIFECYCLE_FD", None)
+            environment["CONTROL_FREAK_BUNDLE_FD"] = str(bundle_fd)
+            environment["CONTROL_FREAK_UPDATE_KEY_FD"] = str(key_fd)
+            environment["XDG_RUNTIME_DIR"] = "/var/run"
+            environment.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+            environment.setdefault("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0")
+            action_code = "from control_freak.app import run; run()" if action == "launch" else "from control_freak.audio import set_blocked; set_blocked([], strict_restore=True)"
+            code = "import os,sys;sys.path.insert(0,'/proc/self/fd/'+os.environ['CONTROL_FREAK_BUNDLE_FD']);" + action_code
+            if action == "launch":
+                os.close(lifecycle_fd)
+                lifecycle_fd = -1
+            try:
+                return subprocess.run((PYTHON, "-I", "-B", "-c", code), env=environment, pass_fds=(bundle_fd, key_fd)).returncode
+            finally:
+                os.close(bundle_fd)
+                os.close(key_fd)
+
+        lock_fd = os.open("web.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if action == "start":
+                reject_lockout(directory_fd)
+                validated_release_fd = validated_release()[1]
+                os.close(validated_release_fd)
+                return start()
+            if action == "status":
+                record = owned_pid()
+                _close_owned(record)
+                return 0 if record is not None else 1
+            record = owned_pid()
+            return stop_owned(record) if record is not None else 1
+        finally:
+            os.close(lock_fd)
+    finally:
+        if lifecycle_fd >= 0:
+            os.close(lifecycle_fd)
+        os.close(directory_fd)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None
