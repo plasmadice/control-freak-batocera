@@ -8,8 +8,10 @@ from pathlib import Path
 import runpy
 import subprocess
 import signal
+import shutil
 import sys
 import time
+import xml.etree.ElementTree as ET
 
 
 TEST_PRIVATE_KEY = subprocess.run(
@@ -94,12 +96,32 @@ def build_app(app: Path, release_id: str, web: str) -> None:
         "gamelist": library / "gamelist.xml",
         "image": library / "images/control-freak.png",
     }
+    gamelist = ET.Element("gameList")
+    game = ET.SubElement(gamelist, "game")
+    for key, value in {
+        "path": "./Control Freak.controlfreak",
+        "name": "Control Freak",
+        "desc": "Controller-first settings and management for Batocera.",
+        "genre": "Utility",
+        "image": "./images/control-freak.png",
+        "developer": "Haku",
+        "publisher": "Haku",
+        "players": "1",
+    }.items():
+        ET.SubElement(game, key).text = value
+    ET.indent(gamelist, space="\t")
+    registration_bytes = {
+        "overlay": b"",
+        "marker": b"",
+        "gamelist": b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(gamelist, encoding="utf-8") + b"\n",
+        "image": b"",
+    }
     registration = {}
     for name, target in registration_paths.items():
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"")
+        target.write_bytes(registration_bytes[name])
         target.chmod(0o644)
-        registration[name] = {"sha256": hashlib.sha256(b"").hexdigest(), "mode": 0o644}
+        registration[name] = {"sha256": hashlib.sha256(registration_bytes[name]).hexdigest(), "mode": 0o644}
     (app / "install-manifest.json").write_text(json.dumps({"version": 6, "static": static, "service": {"name": "control_freak", "sha256": "0" * 64, "mode": 0o755}, "registration": registration, "releases": [release_id]}))
 
 
@@ -165,6 +187,63 @@ def test_service_refuses_modified_release_before_start(tmp_path: Path) -> None:
     (app / "releases/one/control_freak/web.py").write_text("def main(): raise SystemExit\n")
     assert subprocess.run([script, "start"], check=False, capture_output=True).returncode != 0
     assert not (state / "web.pid").exists()
+
+
+def test_service_accepts_emulationstation_play_metadata(tmp_path: Path) -> None:
+    app, _state, script = make_wrapper(tmp_path, "import time\ndef main(): time.sleep(30)\n")
+    gamelist = app.parents[2] / "system/control-freak/library/gamelist.xml"
+    document = ET.parse(gamelist)
+    game = document.getroot().find("game")
+    assert game is not None
+    for key, value in {"playcount": "1", "lastplayed": "20261126T231919", "gametime": "42", "lang": "en"}.items():
+        ET.SubElement(game, key).text = value
+    document.write(gamelist, encoding="utf-8", xml_declaration=True)
+
+    try:
+        assert subprocess.run([script, "start"], check=False, capture_output=True).returncode == 0
+    finally:
+        subprocess.run([script, "stop"], check=False)
+
+
+def test_service_refuses_gamelist_fixed_metadata_drift(tmp_path: Path) -> None:
+    app, state, script = make_wrapper(tmp_path, "import time\ndef main(): time.sleep(30)\n")
+    gamelist = app.parents[2] / "system/control-freak/library/gamelist.xml"
+    document = ET.parse(gamelist)
+    path = document.getroot().find("game/path")
+    assert path is not None
+    path.text = "./Other.controlfreak"
+    document.write(gamelist, encoding="utf-8", xml_declaration=True)
+
+    assert subprocess.run([script, "start"], check=False, capture_output=True).returncode != 0
+    assert not (state / "web.pid").exists()
+
+
+def test_service_rollback_uses_latest_signed_control_plane(tmp_path: Path) -> None:
+    app, _state, script = make_wrapper(tmp_path, "import time\ndef main(): time.sleep(30)\n")
+    old_release = app / "releases/one"
+    control_release = app / "releases/two"
+    shutil.copytree(old_release, control_release)
+    release_manifest = json.loads((control_release / "manifest.json").read_text())
+    release_manifest["release_id"] = "two"
+    (control_release / "manifest.json").write_text(json.dumps(release_manifest))
+    install_manifest = json.loads((app / "install-manifest.json").read_text())
+    install_manifest["releases"].append("two")
+    (app / "install-manifest.json").write_text(json.dumps(install_manifest))
+    trust = json.loads((old_release / "trust.json").read_text())
+    trust["service"]["sha256"] = "f" * 64
+    trust["source"][0]["sha256"] = "f" * 64
+    statement = (json.dumps(trust, indent=2, sort_keys=True) + "\n").encode()
+    for name in ("trust.json", "trust.sig"):
+        (old_release / name).chmod(0o644)
+    (old_release / "trust.json").write_bytes(statement)
+    (old_release / "trust.sig").write_bytes(sign_statement(statement))
+    for name in ("trust.json", "trust.sig"):
+        (old_release / name).chmod(0o444)
+
+    try:
+        assert subprocess.run([script, "start"], check=False, capture_output=True).returncode == 0
+    finally:
+        subprocess.run([script, "stop"], check=False)
 
 
 def test_service_wrapper_rejects_unexpected_owner_uid(tmp_path: Path) -> None:

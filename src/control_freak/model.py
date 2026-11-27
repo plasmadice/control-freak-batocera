@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, auto
 import ipaddress
+import re
 import textwrap
 from typing import Any
 
@@ -53,6 +54,15 @@ class Confirmation:
     row_id: str
     title: str
     message: str
+
+
+def _audio_output_type(label: str) -> tuple[str, int | None]:
+    if match := re.search(r"\b(HDMI|DisplayPort)(?:\s+(\d+))?\b", label, re.IGNORECASE):
+        return ("DisplayPort" if match.group(1).lower() == "displayport" else "HDMI", int(match.group(2)) if match.group(2) else None)
+    for name in ("Headphones", "Speakers", "Analog"):
+        if name.lower().rstrip("s") in label.lower():
+            return name, None
+    return "Output", None
 
 
 @dataclass
@@ -235,18 +245,57 @@ def build_fixture_model(
     except ipaddress.AddressValueError:
         tailscale_address = None
     blocked = set(blocked_audio or [])
-    audio_rows = [
-        SettingRow(
-            f"audio-block:{item['value']}",
-            f"Block audio output {index}",
-            "Desired blacklist policy. Background mute enforcement can fail independently.",
-            RowKind.TOGGLE,
-            item["value"] in blocked,
-            field_label="OUTPUT",
-            field_value=item["label"],
+    output_types = [_audio_output_type(item["label"]) for item in audio_outputs or []]
+    type_counts = {name: sum(output_type == name for output_type, _number in output_types) for name, _number in output_types}
+    reserved_numbers = {
+        name: {number for output_type, number in output_types if output_type == name and number is not None}
+        for name, _number in output_types
+    }
+    assigned_numbers: dict[int, int] = {}
+    for output_type, count in type_counts.items():
+        if count == 1:
+            continue
+        used: set[int] = set()
+        group = [index for index, value in enumerate(output_types) if value[0] == output_type]
+        explicit = {
+            number: min(
+                (index for index in group if output_types[index][1] == number),
+                key=lambda index: (audio_outputs or [])[index]["value"],
+            )
+            for number in reserved_numbers[output_type]
+        }
+        indexes = sorted(
+            group,
+            key=lambda index: (
+                0 if index in explicit.values() else 1 if output_types[index][1] is None else 2,
+                (audio_outputs or [])[index]["value"],
+            ),
         )
-        for index, item in enumerate(audio_outputs or [], 1)
-    ]
+        for index in indexes:
+            assigned = output_types[index][1]
+            if assigned is None or assigned in used:
+                assigned = 1
+                while assigned in used or assigned in reserved_numbers[output_type]:
+                    assigned += 1
+            used.add(assigned)
+            assigned_numbers[index] = assigned
+    audio_rows = []
+    for index, (item, (output_type, number)) in enumerate(zip(audio_outputs or [], output_types)):
+        if type_counts[output_type] == 1:
+            suffix = "" if number is None else f" {number}"
+        else:
+            suffix = f" {assigned_numbers[index]}"
+        audio_rows.append(
+            SettingRow(
+                f"audio-block:{item['value']}",
+                f"Block audio from {output_type}{suffix}",
+                item["label"],
+                RowKind.TOGGLE,
+                item["value"] in blocked,
+                field_label="OUTPUT",
+                field_value=item["label"],
+            )
+        )
     model = AppModel(
         sections=[
             Section(

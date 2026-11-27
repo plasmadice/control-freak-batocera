@@ -1,10 +1,11 @@
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pygame
 
 import control_freak.app as app
-from control_freak.app import _apply_preferences_change, _apply_service_change, _apply_web_change, _check_update, _connection_type, _display_mode, _installed_version, _local_ipv4, _refresh_pairing, _show_release_notes, _tailscale_ipv4
+from control_freak.app import _apply_preferences_change, _apply_service_change, _apply_web_change, _check_update, _connection_type, _display_mode, _finish_update_check, _installed_version, _local_ipv4, _refresh_pairing, _show_release_notes, _start_update_check, _tailscale_ipv4
 from control_freak.model import build_fixture_model
 
 
@@ -185,6 +186,49 @@ def test_manual_update_check_marks_candidate_and_requires_install_confirmation()
     assert model.row("check-updates").value == "1.2.3 available"
     assert model.pending_confirmation is not None
     assert "Install verified 1.2.3" in model.pending_confirmation.message
+
+
+def test_manual_update_check_immediately_shows_progress_without_blocking() -> None:
+    model = build_fixture_model()
+    release = Event()
+
+    def wait_for_release(*_args):
+        release.wait(1)
+        return {"available": False}
+
+    future = _start_update_check(model, "1.0.0", b"key", wait_for_release)
+
+    assert future.done() is False
+    assert model.row("check-updates").value == "Checking…"
+    assert model.row("check-updates").description == "Checking the signed release feed…"
+    assert model.row("check-updates").available is True
+    release.set()
+    assert _finish_update_check(model, future) is None
+    assert model.row("check-updates").value == "Up to date"
+    assert model.row("check-updates").available is True
+
+
+def test_repeated_update_request_keeps_existing_progress() -> None:
+    model = build_fixture_model()
+    release = Event()
+    pending = _start_update_check(model, "1.0.0", b"key", lambda *_args: release.wait(1) or {"available": False})
+
+    assert app._request_update_check(model, pending, "1.0.0", b"key") is pending
+    assert model.row("check-updates").value == "Checking…"
+    assert model.row("check-updates").description == "Checking the signed release feed…"
+    release.set()
+
+
+def test_update_result_is_discarded_after_channel_changes() -> None:
+    model = build_fixture_model(update_channel="stable")
+    candidate = {"available": True, "release_id": "1.2.3", "_candidate": {"signed": True}}
+    pending = _start_update_check(model, "1.0.0", b"key", lambda *_args: candidate)
+    model.row("update-channel").value = "Nightly"
+
+    assert _finish_update_check(model, pending) is None
+    assert model.pending_confirmation is None
+    assert model.row("check-updates").value == "Check again"
+    assert "channel changed" in model.row("check-updates").description.lower()
 
 
 def test_update_check_failure_is_safe_and_visible() -> None:

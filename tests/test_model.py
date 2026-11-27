@@ -51,9 +51,71 @@ def test_audio_outputs_have_independent_block_toggles() -> None:
     )
 
     assert model.row("audio-block:analog").value is True
+    assert model.row("audio-block:analog").label == "Block audio from Analog"
+    assert model.row("audio-block:analog").description == "Built-in Analog Stereo"
     assert model.row("audio-block:analog").field_value == "Built-in Analog Stereo"
     assert model.row("audio-block:hdmi").value is False
+    assert model.row("audio-block:hdmi").label == "Block audio from HDMI"
+    assert model.row("audio-block:hdmi").description == "Digital Stereo (HDMI)"
     assert "kept muted" not in model.row("audio-block:analog").description.lower()
+
+
+def test_duplicate_audio_output_types_are_numbered() -> None:
+    model = build_fixture_model(
+        audio_outputs=[
+            {"value": "dp-a", "label": "GPU Digital Stereo (DisplayPort)"},
+            {"value": "dp-b", "label": "Dock Digital Stereo (DisplayPort)"},
+            {"value": "hdmi-2", "label": "GPU Digital Stereo (HDMI 2)"},
+        ]
+    )
+
+    assert model.row("audio-block:dp-a").label == "Block audio from DisplayPort 1"
+    assert model.row("audio-block:dp-b").label == "Block audio from DisplayPort 2"
+    assert model.row("audio-block:hdmi-2").label == "Block audio from HDMI 2"
+
+
+def test_mixed_audio_output_numbers_remain_unique() -> None:
+    model = build_fixture_model(
+        audio_outputs=[
+            {"value": "hdmi-2", "label": "GPU Digital Stereo (HDMI 2)"},
+            {"value": "hdmi", "label": "Dock Digital Stereo (HDMI)"},
+            {"value": "hdmi-duplicate", "label": "Capture Digital Stereo (HDMI 2)"},
+        ]
+    )
+
+    assert model.row("audio-block:hdmi-2").label == "Block audio from HDMI 2"
+    assert model.row("audio-block:hdmi").label == "Block audio from HDMI 1"
+    assert model.row("audio-block:hdmi-duplicate").label == "Block audio from HDMI 3"
+
+
+def test_explicit_audio_output_number_is_reserved_regardless_of_order() -> None:
+    model = build_fixture_model(
+        audio_outputs=[
+            {"value": "hdmi-a", "label": "Dock A Digital Stereo (HDMI)"},
+            {"value": "hdmi-b", "label": "Dock B Digital Stereo (HDMI)"},
+            {"value": "hdmi-2", "label": "GPU Digital Stereo (HDMI 2)"},
+        ]
+    )
+
+    assert model.row("audio-block:hdmi-a").label == "Block audio from HDMI 1"
+    assert model.row("audio-block:hdmi-b").label == "Block audio from HDMI 3"
+    assert model.row("audio-block:hdmi-2").label == "Block audio from HDMI 2"
+
+
+def test_unnumbered_audio_output_labels_are_stable_across_discovery_order() -> None:
+    outputs = [
+        {"value": "hdmi-a", "label": "Dock A Digital Stereo (HDMI)"},
+        {"value": "hdmi-b", "label": "Dock B Digital Stereo (HDMI)"},
+        {"value": "hdmi-2", "label": "GPU Digital Stereo (HDMI 2)"},
+    ]
+
+    forward = build_fixture_model(audio_outputs=outputs)
+    reverse = build_fixture_model(audio_outputs=list(reversed(outputs)))
+
+    expected = {"hdmi-a": "Block audio from HDMI 1", "hdmi-b": "Block audio from HDMI 3", "hdmi-2": "Block audio from HDMI 2"}
+    for value, label in expected.items():
+        assert forward.row(f"audio-block:{value}").label == label
+        assert reverse.row(f"audio-block:{value}").label == label
 
 
 def test_web_access_requires_confirmation_and_updates_dependents() -> None:

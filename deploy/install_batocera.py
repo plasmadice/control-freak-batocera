@@ -85,7 +85,7 @@ SYSTEMS_OVERLAY = """<?xml version="1.0"?>
     <path>/userdata/system/control-freak/library</path>
     <extension>.controlfreak</extension>
     <command>/userdata/system/services/control_freak launch</command>
-    <theme>ports</theme>
+    <theme>pygame</theme>
   </system>
 </systemList>
 """
@@ -564,6 +564,10 @@ def _registration_bytes(source: Path) -> dict[str, bytes]:
     return {"overlay": SYSTEMS_OVERLAY.encode(), "marker": b"", "gamelist": _library_gamelist(), "image": image.read_bytes()}
 
 
+def _installed_registration_bytes(app: Path) -> dict[str, bytes]:
+    return {"overlay": SYSTEMS_OVERLAY.encode(), "marker": b"", "gamelist": _library_gamelist(), "image": (app / "image.png").read_bytes()}
+
+
 def _preflight_registration(root: Path, data: dict[str, bytes]) -> list[str]:
     missing = []
     for name, path in _registration_paths(root).items():
@@ -580,6 +584,28 @@ def _preflight_registration(root: Path, data: dict[str, bytes]) -> list[str]:
     return missing
 
 
+def _gamelist_is_owned(path: Path) -> bool:
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return False
+    if root.tag != "gameList" or root.attrib or (root.text or "").strip() or (root.tail or "").strip() or len(root) != 1:
+        return False
+    game = root[0]
+    if game.tag != "game" or game.attrib or (game.text or "").strip() or (game.tail or "").strip():
+        return False
+    values: dict[str, str | None] = {}
+    for child in game:
+        if not isinstance(child.tag, str) or child.attrib or len(child) or child.tag in values or (child.tail or "").strip():
+            return False
+        values[child.tag] = child.text
+    expected_game = ET.fromstring(_library_gamelist()).find("game")
+    assert expected_game is not None
+    expected = {child.tag: child.text for child in expected_game}
+    mutable = {"playcount", "lastplayed", "gametime", "lang"}
+    return all(values.get(tag) == value for tag, value in expected.items()) and set(values) <= set(expected) | mutable
+
+
 def _validate_registration(root: Path, registration: dict, expected: dict[str, bytes] | None = None, *, allow_absent: bool = False) -> None:
     for name, path in _registration_paths(root).items():
         try:
@@ -588,7 +614,7 @@ def _validate_registration(root: Path, registration: dict, expected: dict[str, b
                 stat.S_ISREG(info.st_mode)
                 and info.st_uid == os.geteuid()
                 and info.st_mode & 0o777 == registration[name]["mode"]
-                and checksum(path) == registration[name]["sha256"]
+                and (checksum(path) == registration[name]["sha256"] or name == "gamelist" and _gamelist_is_owned(path))
             )
         except FileNotFoundError:
             if allow_absent:
@@ -604,6 +630,10 @@ def _validate_registration(root: Path, registration: dict, expected: dict[str, b
 
 def _ensure_registration(root: Path, source: Path) -> dict:
     data = _registration_bytes(source)
+    desired = {
+        name: {"sha256": hashlib.sha256(payload).hexdigest(), "mode": REGISTRATION_MODES[name]}
+        for name, payload in data.items()
+    }
     app = root / APP_REL
     previous = None
     if (app / ROOT_MANIFEST).is_file() and not (app / ROOT_MANIFEST).is_symlink():
@@ -613,7 +643,7 @@ def _ensure_registration(root: Path, source: Path) -> dict:
             _validate_registration(root, previous)
             if previous["image"]["sha256"] != hashlib.sha256(data["image"]).hexdigest():
                 raise RuntimeError("Signed registration image differs from installed registration image")
-            return previous
+            return desired
     paths = _registration_paths(root)
     missing = _preflight_registration(root, data)
     _prepare_owned_directory(root, OVERLAY_REL.parent)
@@ -638,10 +668,28 @@ def _ensure_registration(root: Path, source: Path) -> dict:
             finally:
                 os.close(directory_fd)
         raise
-    return {
-        name: {"sha256": hashlib.sha256(payload).hexdigest(), "mode": REGISTRATION_MODES[name]}
-        for name, payload in data.items()
-    }
+    return desired
+
+
+def _update_registration(root: Path, before: dict, after: dict, data: dict[str, bytes]) -> None:
+    for name, path in _registration_paths(root).items():
+        if after[name]["sha256"] != hashlib.sha256(data[name]).hexdigest():
+            raise RuntimeError(f"Lifecycle protocol mismatch: {name}")
+        info = path.lstat()
+        digest = checksum(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o777 != after[name]["mode"]:
+            raise RuntimeError(f"Modified registration file: {name}")
+        if name == "gamelist" and before[name]["sha256"] == after[name]["sha256"] and _gamelist_is_owned(path):
+            continue
+        if digest not in {before[name]["sha256"], after[name]["sha256"]}:
+            raise RuntimeError(f"Modified registration file: {name}")
+        if digest == after[name]["sha256"]:
+            continue
+        directory_fd = _open_dir(path.parent)
+        try:
+            _atomic_write_at(directory_fd, path.name, data[name], after[name]["mode"])
+        finally:
+            os.close(directory_fd)
 
 
 def _remove_registration(root: Path, registration: dict, *, allow_absent: bool = False) -> None:
@@ -1598,6 +1646,7 @@ def _recover_lifecycle(app: Path, services_fd: int | None) -> None:
     registration = after.get("registration")
     if service_hash is None or set(static) != set(STATIC_FILES) or not isinstance(registration, dict):
         raise RuntimeError("Invalid lifecycle journal")
+    _update_registration(app.parents[2], before.get("registration", registration), registration, _installed_registration_bytes(app))
     _validate_registration(app.parents[2], registration)
     recovered = {
         "version": 6,
@@ -1619,8 +1668,6 @@ def _update_lifecycle(app: Path, services_fd: int, stable: dict[str, bytes], ser
     _recover_lifecycle(app, services_fd)
     before, _ = _load_install(app, allow_missing_service=True)
     service_hash = hashlib.sha256(service_data).hexdigest()
-    if before["version"] == 6 and before["service"]["sha256"] != service_hash:
-        raise RuntimeError("Service lifecycle upgrade requires uninstall")
     after = {
         "version": 6,
         "static": {name: hashlib.sha256(data).hexdigest() for name, data in stable.items()},
@@ -1657,6 +1704,7 @@ def _update_lifecycle(app: Path, services_fd: int, stable: dict[str, bytes], ser
                 _atomic_write_at(services_fd, SERVICE_NAME, service_data, SERVICE_MODE)
             else:
                 _atomic_create_at(services_fd, SERVICE_NAME, service_data, SERVICE_MODE)
+        _update_registration(app.parents[2], before.get("registration", registration), registration, _installed_registration_bytes(app))
         _atomic_write_at(app_fd, ROOT_MANIFEST, _json_bytes(after), 0o600)
         os.unlink(LIFECYCLE_JOURNAL, dir_fd=app_fd)
         os.fsync(app_fd)
@@ -1742,7 +1790,8 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
         if (app / ROOT_MANIFEST).is_file():
             installed = _load_json_file(app / ROOT_MANIFEST, "install manifest")
             if installed.get("version") == 6 and isinstance(installed.get("registration"), dict):
-                _validate_registration(root, installed["registration"])
+                if not (app / LIFECYCLE_JOURNAL).exists() and not (app / LIFECYCLE_JOURNAL).is_symlink():
+                    _validate_registration(root, installed["registration"])
             else:
                 _preflight_registration(root, _registration_bytes(snapshot))
         else:
@@ -1853,34 +1902,53 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
         early_manifest = _load_json_file(app / ROOT_MANIFEST, "install manifest")
         if not _valid_install_manifest(early_manifest):
             raise RuntimeError("Invalid install manifest")
-        if release_id in early_manifest["releases"]:
-            if not _same_manifest(_validate_release(app / "releases" / release_id, release_id), wanted):
+        assert staging is not None
+        tracked = early_manifest["releases"]
+        published = app / "releases" / release_id
+        if release_id in tracked:
+            if (
+                not _same_manifest(_validate_release(published, release_id), wanted)
+                or (published / TRUST_STATEMENT).read_bytes() != (staging / TRUST_STATEMENT).read_bytes()
+                or (published / TRUST_SIGNATURE).read_bytes() != (staging / TRUST_SIGNATURE).read_bytes()
+            ):
                 raise RuntimeError("Source differs from immutable published release")
-        registration = _ensure_registration(root, snapshot)
+        else:
+            unknown = set(os.listdir(app / "releases")) - set(tracked)
+            if unknown:
+                if unknown != {release_id}:
+                    raise RuntimeError(f"Unknown release: {sorted(unknown)[0]}")
+                if (
+                    not _same_manifest(_validate_release(published, release_id), wanted)
+                    or (published / TRUST_STATEMENT).read_bytes() != (staging / TRUST_STATEMENT).read_bytes()
+                    or (published / TRUST_SIGNATURE).read_bytes() != (staging / TRUST_SIGNATURE).read_bytes()
+                ):
+                    raise RuntimeError("Published release differs from source")
+                tracked.append(release_id)
+                app_fd = _open_dir(app)
+                try:
+                    _atomic_write_at(app_fd, ROOT_MANIFEST, _json_bytes(early_manifest), 0o600)
+                finally:
+                    os.close(app_fd)
         _recover_activation(root, app)
         _recover_lifecycle(app, services_fd)
-        try:
-            manifest, current = _load_install(app, allow_missing_service=True)
-        except RuntimeError as exc:
-            # A fully published target release may be the only untracked object after a crash.
-            if str(exc) != f"Unknown release: {release_id}":
-                raise
-            manifest = _load_json_file(app / ROOT_MANIFEST, "install manifest")
-            tracked_value = manifest.get("releases")
-            tracked = tracked_value if isinstance(tracked_value, list) else []
-            unknown = set(os.listdir(app / "releases")) - set(tracked)
-            if unknown != {release_id}:
-                raise exc
-            if not _same_manifest(_validate_release(app / "releases" / release_id, release_id), wanted):
-                raise RuntimeError("Published release differs from source")
+        registration = _ensure_registration(root, snapshot)
+        manifest, current = _load_install(app, allow_missing_service=True)
+        assert staging is not None
+        _prepare_state_directory(root)
+        if release_id not in manifest["releases"]:
+            releases_fd = _open_dir(app / "releases")
+            try:
+                os.rename(staging.name, release_id, src_dir_fd=pygame_fd, dst_dir_fd=releases_fd)
+                staging = None
+                os.fsync(releases_fd)
+            finally:
+                os.close(releases_fd)
             manifest["releases"].append(release_id)
             app_fd = _open_dir(app)
             try:
                 _atomic_write_at(app_fd, ROOT_MANIFEST, _json_bytes(manifest), 0o600)
             finally:
                 os.close(app_fd)
-        assert staging is not None
-        _prepare_state_directory(root)
         _update_lifecycle(app, services_fd, stable, service_data, registration)
         manifest, current = _load_install(app, stable, service_data)
         _recover_shutdown_journal(root, True)
@@ -1902,20 +1970,6 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
                 elif _service_enabled(root):
                     _activate_service(root, "stop", "start")
                 return [f"already installed {release_id}"]
-        else:
-            releases_fd = _open_dir(app / "releases")
-            try:
-                os.rename(staging.name, release_id, src_dir_fd=pygame_fd, dst_dir_fd=releases_fd)
-                staging = None
-                os.fsync(releases_fd)
-            finally:
-                os.close(releases_fd)
-            manifest["releases"].append(release_id)
-            app_fd = _open_dir(app)
-            try:
-                _atomic_write_at(app_fd, ROOT_MANIFEST, _json_bytes(manifest), 0o600)
-            finally:
-                os.close(app_fd)
 
         after = {"version": 1, "release_id": release_id, "channel": channel}
         enabled = _service_enabled(root)

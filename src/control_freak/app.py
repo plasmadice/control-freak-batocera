@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future
 import ipaddress
 import json
 import os
 from pathlib import Path
 import socket
 import subprocess
+from threading import Thread
 from typing import Any
 
 import pygame
@@ -90,9 +92,11 @@ def _check_update(model, installed: str, public_key: bytes, check=check_for_upda
     try:
         result = check(str(model.row("update-channel").value).lower(), installed, public_key, UPDATE_STATE)
     except (UpdateError, OSError, ValueError) as exc:
+        row.available = True
         row.value = "Check failed"
         row.description = f"Could not check for a signed update: {exc}"
         return None
+    row.available = True
     if not result["available"]:
         row.value = "Up to date"
         row.description = "The installed release is current for this channel."
@@ -100,6 +104,45 @@ def _check_update(model, installed: str, public_key: bytes, check=check_for_upda
     row.value = f"{result['release_id']} available"
     model.pending_confirmation = Confirmation("check-updates", "Install update", f"Install verified {result['release_id']} now? The current version will be retained for rollback.")
     return result["_candidate"]
+
+
+def _start_update_check(model, installed: str, public_key: bytes, check=check_for_update) -> Future:
+    row = model.row("check-updates")
+    channel = str(model.row("update-channel").value).lower()
+    row.value = "Checking…"
+    row.description = "Checking the signed release feed…"
+    future = Future()
+
+    def run_check() -> None:
+        try:
+            future.set_result((channel, check(channel, installed, public_key, UPDATE_STATE)))
+        except BaseException as exc:
+            future.set_exception(exc)
+
+    Thread(target=run_check, daemon=True).start()
+    return future
+
+
+def _request_update_check(model, pending: Future | None, installed: str, public_key: bytes) -> Future | None:
+    if pending is not None:
+        return pending
+    if not public_key:
+        model.row("check-updates").description = "The signed update key is unavailable."
+        return None
+    return _start_update_check(model, installed, public_key)
+
+
+def _finish_update_check(model, future: Future) -> dict | None:
+    try:
+        channel, result = future.result()
+    except (UpdateError, OSError, ValueError):
+        return _check_update(model, "", b"", check=lambda *_args: future.result()[1])
+    if channel != str(model.row("update-channel").value).lower():
+        row = model.row("check-updates")
+        row.value = "Check again"
+        row.description = "The update channel changed while the previous check was running."
+        return None
+    return _check_update(model, "", b"", check=lambda *_args: result)
 
 
 def _show_release_notes(model, installed: str, public_key: bytes, load=cached_notes) -> bool:
@@ -248,6 +291,7 @@ def run(windowed: bool = False) -> None:
     )
 
     pending_update = None
+    pending_update_check = None
     while model.running:
         events = pygame.event.get()
         for event in events:
@@ -313,10 +357,8 @@ def run(windowed: bool = False) -> None:
                         model.row("check-updates").value = "Install failed"
                         model.row("check-updates").description = f"Verified update was not installed: {exc}"
                     pending_update = None
-                elif update_key:
-                    pending_update = _check_update(model, installed, update_key)
                 else:
-                    model.row("check-updates").description = "The signed update key is unavailable."
+                    pending_update_check = _request_update_check(model, pending_update_check, installed, update_key)
             elif requested == "whats-new":
                 _show_release_notes(model, installed, update_key)
             elif requested == "rollback" and confirmation_before:
@@ -331,6 +373,10 @@ def run(windowed: bool = False) -> None:
                     model.row("rollback").value = previous or "Unavailable"
                 except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                     model.row("rollback").description = f"Rollback failed safely: {exc}"
+
+        if pending_update_check is not None and pending_update_check.done():
+            pending_update = _finish_update_check(model, pending_update_check)
+            pending_update_check = None
 
         render(canvas, model)
         destination = screen.get_rect()

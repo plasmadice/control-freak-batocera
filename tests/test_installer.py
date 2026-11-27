@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 import sys
@@ -625,6 +626,7 @@ def test_install_uses_root_owned_custom_system_without_rom_executables(tmp_path:
     assert (application / "releases/one/control_freak/app.py").is_file()
     assert not (tmp_path / "roms").exists()
     assert overlay.read_text() == installer.SYSTEMS_OVERLAY
+    assert "<theme>pygame</theme>" in overlay.read_text()
     assert (library / "Control Freak.controlfreak").read_bytes() == b""
     assert (library / "Control Freak.controlfreak").stat().st_mode & 0o111 == 0
     game = ET.parse(library / "gamelist.xml").getroot().find("game")
@@ -638,6 +640,47 @@ def test_install_uses_root_owned_custom_system_without_rom_executables(tmp_path:
         "gamelist": {"sha256": installer.checksum(library / "gamelist.xml"), "mode": 0o644},
         "image": {"sha256": installer.checksum(library / "images/control-freak.png"), "mode": 0o644},
     }
+
+
+def test_update_replaces_owned_ports_theme_registration(tmp_path: Path, source_root: Path) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    application = app(tmp_path)
+    overlay = tmp_path / installer.OVERLAY_REL
+    overlay.write_text(overlay.read_text().replace("<theme>pygame</theme>", "<theme>ports</theme>"))
+    manifest = json.loads((application / installer.ROOT_MANIFEST).read_text())
+    manifest["registration"]["overlay"]["sha256"] = installer.checksum(overlay)
+    (application / installer.ROOT_MANIFEST).write_bytes(installer._json_bytes(manifest))
+
+    install(tmp_path, source_root, "two", "stable")
+
+    assert "<theme>pygame</theme>" in overlay.read_text()
+    manifest = json.loads((application / installer.ROOT_MANIFEST).read_text())
+    assert manifest["registration"]["overlay"]["sha256"] == installer.checksum(overlay)
+
+
+def test_update_recovers_crash_after_registration_migration(tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    application = app(tmp_path)
+    overlay = tmp_path / installer.OVERLAY_REL
+    overlay.write_text(overlay.read_text().replace("<theme>pygame</theme>", "<theme>ports</theme>"))
+    manifest = json.loads((application / installer.ROOT_MANIFEST).read_text())
+    manifest["registration"]["overlay"]["sha256"] = installer.checksum(overlay)
+    (application / installer.ROOT_MANIFEST).write_bytes(installer._json_bytes(manifest))
+    real_atomic_write = installer._atomic_write_at
+
+    def crash_after_overlay(directory_fd, name, data, mode):
+        real_atomic_write(directory_fd, name, data, mode)
+        if name == installer.OVERLAY_REL.name:
+            raise KeyboardInterrupt("crash")
+
+    monkeypatch.setattr(installer, "_atomic_write_at", crash_after_overlay)
+    with pytest.raises(KeyboardInterrupt, match="crash"):
+        install(tmp_path, source_root, "two", "stable")
+
+    monkeypatch.setattr(installer, "_atomic_write_at", real_atomic_write)
+    install(tmp_path, source_root, "two", "stable")
+    assert "<theme>pygame</theme>" in overlay.read_text()
+    assert not (application / installer.LIFECYCLE_JOURNAL).exists()
 
 
 def test_update_migrates_v3_from_legacy_rom_root(tmp_path: Path, source_root: Path) -> None:
@@ -720,6 +763,65 @@ def test_uninstall_preserves_unknown_library_files(tmp_path: Path, source_root: 
     assert unknown.read_text() == "keep"
     assert not (tmp_path / installer.OVERLAY_REL).exists()
     assert not app(tmp_path).exists()
+
+
+def test_update_accepts_emulationstation_gamelist_play_metadata(tmp_path: Path, source_root: Path) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    gamelist = installer._registration_paths(tmp_path)["gamelist"]
+    tree = ET.parse(gamelist)
+    game = tree.getroot().find("game")
+    assert game is not None
+    for tag, text in (
+        ("playcount", "2"),
+        ("lastplayed", "20261126T170445"),
+        ("gametime", "2430"),
+        ("lang", "en"),
+    ):
+        ET.SubElement(game, tag).text = text
+    tree.write(gamelist, encoding="utf-8", xml_declaration=True)
+
+    install(tmp_path, source_root, "two", "stable")
+
+    game = ET.parse(gamelist).getroot().find("game")
+    assert game is not None
+    assert game.findtext("playcount") == "2"
+    assert game.findtext("lastplayed") == "20261126T170445"
+    assert game.findtext("gametime") == "2430"
+    assert game.findtext("lang") == "en"
+
+
+def test_update_refuses_gamelist_fixed_metadata_drift(tmp_path: Path, source_root: Path) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    gamelist = installer._registration_paths(tmp_path)["gamelist"]
+    tree = ET.parse(gamelist)
+    game = tree.getroot().find("game")
+    assert game is not None
+    path = game.find("path")
+    assert path is not None
+    path.text = "./Other.controlfreak"
+    tree.write(gamelist, encoding="utf-8", xml_declaration=True)
+
+    with pytest.raises(RuntimeError, match="Modified registration file: gamelist"):
+        install(tmp_path, source_root, "two", "stable")
+
+
+@pytest.mark.parametrize("location", ["root", "game", "tail"])
+def test_gamelist_ownership_rejects_mixed_content(tmp_path: Path, location: str) -> None:
+    gamelist = tmp_path / "gamelist.xml"
+    gamelist.write_bytes(installer._library_gamelist())
+    tree = ET.parse(gamelist)
+    root = tree.getroot()
+    game = root.find("game")
+    assert game is not None
+    if location == "root":
+        root.text = "unexpected"
+    elif location == "game":
+        game.text = "unexpected"
+    else:
+        game[0].tail = "unexpected"
+    tree.write(gamelist, encoding="utf-8", xml_declaration=True)
+
+    assert installer._gamelist_is_owned(gamelist) is False
 
 
 @pytest.mark.parametrize("name", ["overlay", "marker", "gamelist", "image"])
@@ -872,7 +974,7 @@ def test_v3_migration_recovers_after_launcher_replace(tmp_path: Path, source_roo
     real = installer._atomic_write_at
 
     def crash(directory_fd: int, name: str, data: bytes, mode: int) -> None:
-        if name == installer.ROOT_MANIFEST:
+        if name == installer.ROOT_MANIFEST and (app(tmp_path) / installer.LIFECYCLE_JOURNAL).is_file():
             raise KeyboardInterrupt
         real(directory_fd, name, data, mode)
 
@@ -1225,7 +1327,7 @@ def test_install_migrates_version_two_manifest_to_owned_service(tmp_path: Path, 
     installer_script.write_bytes(installer_script.read_bytes() + b"\n# new lifecycle revision\n")
     resign_source(new_source, private)
 
-    install(tmp_path / "root", new_source, "one", "stable")
+    install(tmp_path / "root", new_source, "two", "stable")
 
     migrated = json.loads((app(tmp_path / "root") / "install-manifest.json").read_text())
     assert migrated["version"] == 6
@@ -1235,7 +1337,7 @@ def test_install_migrates_version_two_manifest_to_owned_service(tmp_path: Path, 
     assert (app(tmp_path / "root") / "logo-proposal-4.png").read_bytes() == (new_source / "assets/control-freak-logo-4.png").read_bytes()
 
 
-def test_install_refuses_in_place_service_protocol_change(tmp_path: Path, source_root: Path) -> None:
+def test_install_updates_authenticated_service_wrapper(tmp_path: Path, source_root: Path) -> None:
     source = copied_source(tmp_path, source_root)
     install(tmp_path / "root", source, "one", "stable")
     service = tmp_path / "root/system/services/control_freak"
@@ -1244,10 +1346,45 @@ def test_install_refuses_in_place_service_protocol_change(tmp_path: Path, source
     service_source.write_text(service_source.read_text() + "\n# updated\n")
     resign_source(source)
 
-    with pytest.raises(RuntimeError, match="requires uninstall"):
-        install(tmp_path / "root", source, "one", "stable")
+    install(tmp_path / "root", source, "two", "stable")
 
-    assert service.read_bytes() == original
+    assert service.read_bytes() != original
+    assert service.read_bytes() == installer._service_bytes(source, tmp_path / "root")
+    assert current(tmp_path / "root")["release_id"] == "two"
+    assert json.loads((app(tmp_path / "root") / installer.ROOT_MANIFEST).read_text())["releases"] == ["one", "two"]
+    _release, bundle_fd = runpy.run_path(str(service))["validated_release"]()
+    os.close(bundle_fd)
+
+
+def test_service_wrapper_update_recovers_after_atomic_publish(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = copied_source(tmp_path, source_root)
+    root = tmp_path / "root"
+    install(root, source, "one", "stable")
+    service_source = source / "deploy/control_freak"
+    service_source.write_text(service_source.read_text() + "\n# updated\n")
+    resign_source(source)
+    real = installer._atomic_write_at
+
+    def crash(directory_fd: int, name: str, data: bytes, mode: int) -> None:
+        real(directory_fd, name, data, mode)
+        if name == installer.SERVICE_NAME:
+            raise SystemExit("crash")
+
+    monkeypatch.setattr(installer, "_atomic_write_at", crash)
+    with pytest.raises(SystemExit, match="crash"):
+        install(root, source, "two", "stable")
+
+    assert (app(root) / installer.LIFECYCLE_JOURNAL).is_file()
+    assert (app(root) / "releases/two").is_dir()
+    assert "two" in json.loads((app(root) / installer.ROOT_MANIFEST).read_text())["releases"]
+    monkeypatch.setattr(installer, "_atomic_write_at", real)
+    install(root, source, "two", "stable")
+
+    assert (root / installer.SERVICES_REL / installer.SERVICE_NAME).read_bytes() == installer._service_bytes(source, root)
+    assert current(root)["release_id"] == "two"
+    assert not (app(root) / installer.LIFECYCLE_JOURNAL).exists()
 
 
 def test_service_repair_does_not_replace_concurrent_unknown_file(tmp_path: Path, source_root: Path, monkeypatch) -> None:
@@ -1279,13 +1416,13 @@ def test_uninstall_recovers_interrupted_lifecycle_update(tmp_path: Path, source_
     real = installer._atomic_write_at
 
     def crash(directory_fd: int, name: str, data: bytes, mode: int) -> None:
-        if name == installer.ROOT_MANIFEST:
+        if name == installer.ROOT_MANIFEST and (app(root) / installer.LIFECYCLE_JOURNAL).is_file():
             raise KeyboardInterrupt
         real(directory_fd, name, data, mode)
 
     monkeypatch.setattr(installer, "_atomic_write_at", crash)
     with pytest.raises(KeyboardInterrupt):
-        install(root, source, "one", "stable")
+        install(root, source, "two", "stable")
     assert (app(root) / installer.LIFECYCLE_JOURNAL).is_file()
 
     monkeypatch.setattr(installer, "_atomic_write_at", real)
@@ -1521,6 +1658,53 @@ def test_update_recovers_after_release_publish_crash(tmp_path: Path, source_root
     assert current(tmp_path)["release_id"] == "two"
 
 
+def test_update_recovery_rejects_reused_id_with_different_trust(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = copied_source(tmp_path / "source", source_root)
+    root = tmp_path / "root"
+    private = resign_source(source)
+    install(root, source, "one", "stable")
+    installed_service = root / installer.SERVICES_REL / installer.SERVICE_NAME
+    before = installed_service.read_bytes()
+    real = installer._atomic_write_at
+
+    def crash(directory_fd: int, name: str, data: bytes, mode: int) -> None:
+        if name == installer.ROOT_MANIFEST:
+            raise KeyboardInterrupt
+        real(directory_fd, name, data, mode)
+
+    monkeypatch.setattr(installer, "_atomic_write_at", crash)
+    with pytest.raises(KeyboardInterrupt):
+        install(root, source, "two", "nightly")
+
+    monkeypatch.setattr(installer, "_atomic_write_at", real)
+    recoveries = []
+    monkeypatch.setattr(installer, "_recover_activation", lambda *_args: recoveries.append("activation"))
+    monkeypatch.setattr(installer, "_recover_lifecycle", lambda *_args: recoveries.append("lifecycle"))
+    published_signature = app(root) / "releases/two" / installer.TRUST_SIGNATURE
+    original_signature = published_signature.read_bytes()
+    published_signature.chmod(0o600)
+    published_signature.write_bytes(b"corrupt")
+    published_signature.chmod(0o444)
+    with pytest.raises(RuntimeError, match="Published release differs from source"):
+        install(root, source, "two", "nightly")
+    assert installed_service.read_bytes() == before
+    published_signature.chmod(0o600)
+    published_signature.write_bytes(original_signature)
+    published_signature.chmod(0o444)
+
+    wrapper = source / "deploy/control_freak"
+    wrapper.write_bytes(wrapper.read_bytes() + b"\n# different authenticated wrapper\n")
+    resign_source(source, private)
+
+    with pytest.raises(RuntimeError, match="Published release differs from source"):
+        install(root, source, "two", "nightly")
+
+    assert installed_service.read_bytes() == before
+    assert recoveries == []
+
+
 @pytest.mark.parametrize("enabled,running", [(False, False), (False, True), (True, False), (True, True)])
 def test_update_journals_service_state_before_abrupt_pointer_crash(
     tmp_path: Path,
@@ -1575,6 +1759,28 @@ def test_same_id_source_mismatch_precedes_activation_recovery(
 
     with pytest.raises(RuntimeError, match="Source differs from immutable published release"):
         install(root, source, "one", "stable")
+
+    assert actions == []
+
+
+def test_same_id_signature_mismatch_precedes_activation_recovery(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    install(root, source_root, "one", "stable")
+    selected = current(root)
+    (app(root) / installer.ACTIVATION_JOURNAL).write_bytes(
+        installer._json_bytes({"version": 1, "before": selected, "after": selected})
+    )
+    signature = app(root) / "releases/one" / installer.TRUST_SIGNATURE
+    signature.chmod(0o600)
+    signature.write_bytes(b"corrupt")
+    signature.chmod(0o444)
+    actions = []
+    monkeypatch.setattr(installer, "_service_actions", lambda *_args: actions.append(_args))
+
+    with pytest.raises(RuntimeError, match="Source differs from immutable published release"):
+        install(root, source_root, "one", "stable")
 
     assert actions == []
 
@@ -1804,6 +2010,25 @@ def test_force_reselects_same_release_only_when_source_matches(tmp_path: Path, s
     (source / "src/control_freak/app.py").write_text("changed source")
     with pytest.raises(RuntimeError, match="Release trust statement"):
         install(tmp_path / "root", source, "one", "stable", force=True)
+
+
+def test_same_release_rejects_authenticated_service_wrapper_change(
+    tmp_path: Path, source_root: Path
+) -> None:
+    source = copied_source(tmp_path, source_root)
+    root = tmp_path / "root"
+    install(root, source, "one", "stable")
+    installed_service = root / installer.SERVICES_REL / installer.SERVICE_NAME
+    before = installed_service.read_bytes()
+
+    wrapper = source / "deploy/control_freak"
+    wrapper.write_bytes(wrapper.read_bytes() + b"\n# authenticated replacement\n")
+    resign_source(source)
+
+    with pytest.raises(RuntimeError, match="immutable published release"):
+        install(root, source, "one", "stable")
+
+    assert installed_service.read_bytes() == before
 
 
 def test_force_does_not_overwrite_unknown_current_pointer(tmp_path: Path, source_root: Path) -> None:

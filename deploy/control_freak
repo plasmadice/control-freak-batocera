@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 
 APP = Path("/userdata/system/control-freak/app")
@@ -150,6 +151,68 @@ def release_metadata(root: Path, name: str) -> bytes:
         os.close(fd)
 
 
+def owned_gamelist(path: Path) -> bool:
+    try:
+        root = ET.fromstring(path.read_bytes())
+    except (OSError, ET.ParseError):
+        return False
+    if root.tag != "gameList" or root.attrib or (root.text or "").strip() or (root.tail or "").strip() or len(root) != 1:
+        return False
+    game = root[0]
+    if game.tag != "game" or game.attrib or (game.text or "").strip() or (game.tail or "").strip():
+        return False
+    fields: dict[str, str | None] = {}
+    for child in game:
+        if not isinstance(child.tag, str) or child.tag in fields or child.attrib or len(child) or (child.tail or "").strip():
+            return False
+        fields[child.tag] = child.text
+    fixed = {
+        "path": "./Control Freak.controlfreak",
+        "name": "Control Freak",
+        "desc": "Controller-first settings and management for Batocera.",
+        "genre": "Utility",
+        "image": "./images/control-freak.png",
+        "developer": "Haku",
+        "publisher": "Haku",
+        "players": "1",
+    }
+    return all(fields.get(name) == value for name, value in fixed.items()) and set(fields) <= set(fixed) | {"playcount", "lastplayed", "gametime", "lang"}
+
+
+def trusted_control_plane(releases: list[str], static: dict, registration: dict) -> bool:
+    service_hash = hashlib.sha256(canonical_wrapper()).hexdigest()
+    for release in releases:
+        root = APP / "releases" / release
+        try:
+            statement = release_metadata(root, TRUST_STATEMENT)
+            signature = release_metadata(root, TRUST_SIGNATURE)
+            trust = json.loads(statement)
+            service = trust.get("service") if isinstance(trust, dict) else None
+            source = trust.get("source") if isinstance(trust, dict) else None
+            if (
+                not isinstance(trust, dict)
+                or set(trust) != {"version", "files", "service", "source"}
+                or trust.get("version") != 2
+                or not isinstance(service, dict)
+                or service != {"sha256": service_hash, "mode": 0o755}
+                or not isinstance(source, list)
+                or any(not isinstance(item, dict) or set(item) != {"path", "sha256", "mode"} for item in source)
+            ):
+                continue
+            source_hashes = {item["path"]: item["sha256"] for item in source}
+            if (
+                len(source_hashes) != len(source)
+                or source_hashes.get("deploy/install_batocera.py") != static["install_batocera.py"]
+                or source_hashes.get("assets/control-freak-image.png") != registration["image"]["sha256"]
+            ):
+                continue
+            verify_signature(statement, signature)
+        except (KeyError, OSError, TypeError, ValueError, RuntimeError):
+            continue
+        return True
+    return False
+
+
 def validated_release() -> tuple[str, int]:
     current = json.loads((APP / "current.json").read_text())
     manifest = json.loads((APP / "install-manifest.json").read_text())
@@ -191,7 +254,7 @@ def validated_release() -> tuple[str, int]:
             info = target.lstat()
         except OSError as exc:
             raise RuntimeError("Modified Control Freak registration") from exc
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o777 != registration[name]["mode"] or checksum(target) != registration[name]["sha256"]:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o777 != registration[name]["mode"] or checksum(target) != registration[name]["sha256"] and (name != "gamelist" or not owned_gamelist(target)):
             raise RuntimeError("Modified Control Freak registration")
     root = APP / "releases" / release
     if root.is_symlink() or not root.is_dir():
@@ -246,11 +309,10 @@ def validated_release() -> tuple[str, int]:
     ):
         raise RuntimeError("Release trust statement does not match payload")
     verify_signature(statement, signature)
-    source_hashes = {item["path"]: item["sha256"] for item in source_trust}
-    if len(source_hashes) != len(source_trust) or source_hashes.get("deploy/install_batocera.py") != static["install_batocera.py"] or source_hashes.get("assets/control-freak-image.png") != registration["image"]["sha256"]:
+    if len({item["path"] for item in source_trust}) != len(source_trust):
+        raise RuntimeError("Release trust statement does not match payload")
+    if not trusted_control_plane(releases, static, registration):
         raise RuntimeError("Release trust statement does not match installed payload")
-    if hashlib.sha256(canonical_wrapper()).hexdigest() != service_trust["sha256"]:
-        raise RuntimeError("Modified Control Freak service wrapper")
     actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and not path.is_symlink()}
     actual_directories = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_dir() and not path.is_symlink()}
     if actual != expected or actual_directories != expected_directories or any(path.is_symlink() or not (path.is_file() or path.is_dir()) for path in root.rglob("*")):
