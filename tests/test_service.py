@@ -224,12 +224,20 @@ def test_service_rejects_ambiguous_native_pygame_entry(tmp_path: Path) -> None:
     assert "Modified Control Freak registration" in result.stderr
 
 
-def test_service_accepts_group_writable_native_pygame_directory(tmp_path: Path) -> None:
+def test_service_accepts_platform_owned_group_writable_native_gamelist(tmp_path: Path) -> None:
     app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
-    (app.parents[2] / "roms/pygame").chmod(0o2775)
+    pygame = app.parents[2] / "roms/pygame"
+    gamelist = pygame / "gamelist.xml"
+    pygame.chmod(0o775)
+    gamelist.chmod(0o664)
 
     result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+    gamelist.chmod(0o666)
+    result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "Modified Control Freak registration" in result.stderr
 
 
 def test_service_rejects_world_writable_native_pygame_directory(tmp_path: Path) -> None:
@@ -237,6 +245,18 @@ def test_service_rejects_world_writable_native_pygame_directory(tmp_path: Path) 
     (app.parents[2] / "roms/pygame").chmod(0o777)
 
     result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "Modified Control Freak registration" in result.stderr
+
+
+def test_service_rejects_native_pygame_fifo_without_blocking(tmp_path: Path) -> None:
+    app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
+    gamelist = app.parents[2] / "roms/pygame/gamelist.xml"
+    gamelist.unlink()
+    os.mkfifo(gamelist)
+
+    result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True, timeout=2)
+
     assert result.returncode != 0
     assert "Modified Control Freak registration" in result.stderr
 

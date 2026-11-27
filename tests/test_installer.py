@@ -702,6 +702,12 @@ def test_update_recovers_crash_after_registration_migration(tmp_path: Path, sour
         install(tmp_path, source_root, "two", "stable")
 
     monkeypatch.setattr(installer, "_atomic_write_at", real_atomic_write)
+    pygame = tmp_path / "roms/pygame"
+    pygame.chmod(0o777)
+    with pytest.raises(RuntimeError, match="unsafe pygame directory"):
+        install(tmp_path, source_root, "two", "stable")
+    assert (application / installer.LIFECYCLE_JOURNAL).is_file()
+    pygame.chmod(0o775)
     install(tmp_path, source_root, "two", "stable")
     assert overlay.read_text() == installer.SYSTEMS_OVERLAY
     assert not (application / installer.LIFECYCLE_JOURNAL).exists()
@@ -710,6 +716,7 @@ def test_update_recovers_crash_after_registration_migration(tmp_path: Path, sour
 def test_update_migrates_v3_from_legacy_rom_root(tmp_path: Path, source_root: Path) -> None:
     install(tmp_path, source_root, "one", "stable")
     launcher = make_legacy_v3(tmp_path)
+    (tmp_path / installer.LEGACY_APP_PARENT_REL).chmod(0o775)
 
     install(tmp_path, source_root, "two", "stable")
 
@@ -835,10 +842,10 @@ def test_update_accepts_emulationstation_gamelist_play_metadata(tmp_path: Path, 
     assert native_games[1].findtext("playcount") == "3"
 
 
-def test_shared_gamelist_refuses_unsafe_mode_on_install(tmp_path: Path, source_root: Path) -> None:
+def test_shared_gamelist_refuses_world_writable_file_before_install(tmp_path: Path, source_root: Path) -> None:
     pygame = tmp_path / "roms/pygame"
     pygame.mkdir(parents=True)
-    pygame.chmod(0o755)
+    pygame.chmod(0o775)
     gamelist = pygame / "gamelist.xml"
     gamelist.write_bytes(b"<gameList><game><path>./other.pygame</path><name>Other</name></game></gameList>\n")
     gamelist.chmod(0o666)
@@ -848,6 +855,36 @@ def test_shared_gamelist_refuses_unsafe_mode_on_install(tmp_path: Path, source_r
 
     assert gamelist.stat().st_mode & 0o777 == 0o666
     assert not app(tmp_path).exists()
+
+
+def test_shared_gamelist_refuses_world_writable_parent_before_snapshot(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o777)
+    monkeypatch.setattr(installer, "_snapshot_source", lambda *_args: pytest.fail("source snapshot started"))
+
+    with pytest.raises(RuntimeError, match="unsafe pygame directory"):
+        install(tmp_path, source_root, "one", "stable")
+
+    assert not app(tmp_path).exists()
+
+
+def test_update_and_uninstall_refuse_world_writable_pygame_parent(
+    tmp_path: Path, source_root: Path,
+) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    pygame = tmp_path / "roms/pygame"
+    pygame.chmod(0o777)
+
+    with pytest.raises(RuntimeError, match="unsafe pygame directory"):
+        install(tmp_path, source_root, "two", "stable")
+    with pytest.raises(RuntimeError, match="unsafe pygame directory"):
+        uninstall(tmp_path)
+
+    assert current(tmp_path)["release_id"] == "one"
+    assert app(tmp_path).is_dir()
 
 
 def test_shared_gamelist_allows_batocera_roms_parent_mode(tmp_path: Path, source_root: Path) -> None:
@@ -863,16 +900,73 @@ def test_shared_gamelist_allows_batocera_roms_parent_mode(tmp_path: Path, source
     assert (pygame / "gamelist.xml").is_file()
 
 
-def test_shared_gamelist_allows_platform_owned_pygame_parent(tmp_path: Path, source_root: Path) -> None:
+def test_platform_owned_group_writable_gamelist_survives_full_lifecycle(
+    tmp_path: Path, source_root: Path,
+) -> None:
     pygame = tmp_path / "roms/pygame"
     pygame.mkdir(parents=True)
-    pygame.chmod(0o2775)
+    pygame.chmod(0o775)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList><game><path>./other.pygame</path><name>Other</name></game></gameList>\n")
+    gamelist.chmod(0o664)
 
     install(tmp_path, source_root, "one", "stable")
     install(tmp_path, source_root, "two", "stable")
+    uninstall(tmp_path)
 
-    assert pygame.stat().st_mode & 0o7777 == 0o2775
-    assert (pygame / "gamelist.xml").is_file()
+    assert pygame.stat().st_mode & 0o777 == 0o775
+    assert gamelist.stat().st_mode & 0o777 == 0o664
+    assert [game.findtext("name") for game in ET.parse(gamelist).getroot().findall("game")] == ["Other"]
+
+
+def test_gamelist_state_accepts_non_euid_platform_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = SimpleNamespace(st_mode=stat.S_IFREG | 0o664, st_uid=os.geteuid() + 1)
+    monkeypatch.setattr(installer, "_read_at", lambda *_args: (b"<gameList />", info))
+
+    assert installer._gamelist_state(1) == (b"<gameList />", 0o664, info)
+
+
+def test_gamelist_state_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    pygame = tmp_path / "pygame"
+    pygame.mkdir()
+    os.mkfifo(pygame / "gamelist.xml")
+    probe = (
+        "import os,sys;from deploy import install_batocera as i;"
+        "fd=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);"
+        "i._gamelist_state(fd)"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(pygame)], capture_output=True, text=True, timeout=2,
+    )
+
+    assert result.returncode != 0
+    assert "Expected regular file: gamelist.xml" in result.stderr
+
+
+@pytest.mark.parametrize("controlled", [
+    f"<game><path>{installer.PYGAME_GAME_PATH}</path><name><b>Control Freak</b></name></game>",
+    f"<game><path>{installer.PYGAME_GAME_PATH}</path><path>{installer.PYGAME_GAME_PATH}</path><name>Control Freak</name></game>",
+    f"<game><path>{installer.PYGAME_GAME_PATH}</path><name>Control Freak</name><unknown>bad</unknown></game>",
+])
+def test_native_gamelist_semantics_fail_before_source_snapshot(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch, controlled: str,
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o775)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_text(f"<gameList>{controlled}</gameList>\n")
+    gamelist.chmod(0o664)
+    monkeypatch.setattr(installer, "_snapshot_source", lambda *_args: pytest.fail("source snapshot started"))
+
+    with pytest.raises(RuntimeError, match="Malformed Control Freak gamelist entry"):
+        install(tmp_path, source_root, "one", "stable")
+
+    assert gamelist.read_text() == f"<gameList>{controlled}</gameList>\n"
+    assert not app(tmp_path).exists()
+    assert not (tmp_path / installer.SERVICES_REL / installer.SERVICE_NAME).exists()
+    assert not any(path.exists() for path in installer._registration_paths(tmp_path).values())
 
 
 def test_shared_gamelist_concurrent_write_is_not_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
