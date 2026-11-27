@@ -1,10 +1,19 @@
 import json
 from pathlib import Path
+import tomllib
 import zipfile
 
 import pytest
 
 from scripts.build_release import build_release
+from control_freak import __version__
+
+
+def test_project_and_runtime_versions_match_release() -> None:
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+
+    assert project["project"]["version"] == "0.1.4"
+    assert __version__ == "0.1.4"
 
 
 def release_source(tmp_path: Path) -> Path:
@@ -14,6 +23,7 @@ def release_source(tmp_path: Path) -> Path:
     (source / "src/control_freak").mkdir(parents=True)
     required = {
         "deploy/control_freak": b"service",
+        "deploy/control-freak.pygame": b"launcher",
         "deploy/install_batocera.py": b"installer",
         "deploy/release-public.pem": b"key",
         "deploy/release-trust.json": b"trust",
@@ -47,7 +57,7 @@ def test_release_builder_is_deterministic_and_emits_signable_canonical_metadata(
     assert value["runtime"]["trust_sha256"]
     with zipfile.ZipFile(first[0]) as archive:
         assert set(archive.namelist()) == {item["path"] for item in value["files"]}
-        assert "control-freak-release/deploy/control-freak.pygame" not in archive.namelist()
+        assert "control-freak-release/deploy/control-freak.pygame" in archive.namelist()
 
 
 def test_release_builder_rejects_unexpected_package_file(tmp_path: Path) -> None:

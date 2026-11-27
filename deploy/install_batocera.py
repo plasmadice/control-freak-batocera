@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -30,11 +31,12 @@ LEGACY_APP_PARENT_REL = Path("roms/pygame")
 LIBRARY_REL = Path("system/control-freak/library")
 OVERLAY_REL = Path("system/configs/emulationstation/es_systems_control_freak.cfg")
 GAME_PATH = "./Control Freak.controlfreak"
+PYGAME_GAME_PATH = "../../system/control-freak/app/control-freak.pygame"
 LEGACY_APP_GAME_PATH = "./control-freak/control-freak.pygame"
 LEGACY_GAME_PATH = "../../system/services/control_freak.pygame"
 RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-STATIC_FILES = (
+V6_STATIC_FILES = (
     "image.png",
     "logo-proposal-1.png",
     "logo-proposal-2.png",
@@ -44,7 +46,9 @@ STATIC_FILES = (
     "logo-proposal-6.png",
     "install_batocera.py",
 )
+STATIC_FILES = ("control-freak.pygame", *V6_STATIC_FILES)
 STATIC_MODES = {
+    "control-freak.pygame": 0o644,
     "image.png": 0o644,
     "logo-proposal-1.png": 0o644,
     "logo-proposal-2.png": 0o644,
@@ -54,9 +58,10 @@ STATIC_MODES = {
     "logo-proposal-6.png": 0o644,
     "install_batocera.py": 0o644,
 }
+V6_STATIC_MODES = {name: STATIC_MODES[name] for name in V6_STATIC_FILES}
 LEGACY_LAUNCHER = "control-freak.pygame"
-LEGACY_STATIC_FILES = (LEGACY_LAUNCHER, *STATIC_FILES)
-LEGACY_STATIC_MODES = {LEGACY_LAUNCHER: 0o755, **STATIC_MODES}
+LEGACY_STATIC_FILES = (LEGACY_LAUNCHER, *V6_STATIC_FILES)
+LEGACY_STATIC_MODES = {LEGACY_LAUNCHER: 0o755, **V6_STATIC_MODES}
 ROOT_MANIFEST = "install-manifest.json"
 LIFECYCLE_JOURNAL = ".lifecycle-update.json"
 ACTIVATION_JOURNAL = ".activation.json"
@@ -78,17 +83,9 @@ RUNTIME_LOCKOUT = "runtime.lockout"
 INSTALL_ACTIVATION = "install-activation.json"
 SERVICE_CODE = "import os,runpy,sys;sys.path.insert(0,'/proc/self/fd/'+os.environ['CONTROL_FREAK_BUNDLE_FD']);runpy.run_module('control_freak.service',run_name='__main__')"
 SYSTEMS_OVERLAY = """<?xml version="1.0"?>
-<systemList>
-  <system>
-    <name>controlfreak</name>
-    <fullname>Control Freak</fullname>
-    <path>/userdata/system/control-freak/library</path>
-    <extension>.controlfreak</extension>
-    <command>/userdata/system/services/control_freak launch</command>
-    <theme>pygame</theme>
-  </system>
-</systemList>
+<systemList/>
 """
+LAUNCHER_CODE = 'import os\nos.execv("/userdata/system/services/control_freak", ["control_freak", "launch"])\n'
 MARKER_NAME = "Control Freak.controlfreak"
 REGISTRATION_MODES = {"overlay": 0o644, "marker": 0o644, "gamelist": 0o644, "image": 0o644}
 RELEASE_PUBLIC_KEY = base64.b64decode(
@@ -98,6 +95,7 @@ TRUSTED_SOURCE_FILES = {
     "assets/control-freak-image.png": 0o644,
     **{f"assets/control-freak-logo-{number}.png": 0o644 for number in range(1, 7)},
     "deploy/control_freak": 0o755,
+    "deploy/control-freak.pygame": 0o644,
     "deploy/install_batocera.py": 0o644,
     "deploy/release-public.pem": 0o644,
 }
@@ -165,9 +163,6 @@ def _mkdirs_no_symlinks(root: Path, relative: Path) -> None:
         except FileExistsError:
             if cursor.is_symlink() or not cursor.is_dir():
                 raise RuntimeError(f"Refusing unsafe install parent: {cursor}")
-            info = cursor.stat()
-            if info.st_uid != os.geteuid():
-                raise RuntimeError("Refusing unsafe launcher trust boundary")
 
 
 def _launcher_boundary(root: Path, app: Path) -> None:
@@ -205,6 +200,15 @@ def _open_dir(path: Path) -> int:
         raise
 
 
+def _open_owned_dir(path: Path) -> int:
+    fd = _open_dir(path)
+    info = os.fstat(fd)
+    if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        os.close(fd)
+        raise RuntimeError("Refusing unsafe launcher trust boundary")
+    return fd
+
+
 def _lifecycle_lock(directory_fd: int) -> int:
     global _ACTIVE_LIFECYCLE_LOCK
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
@@ -232,6 +236,16 @@ def _read_at(directory_fd: int, name: str) -> tuple[bytes, os.stat_result]:
             return handle.read(), info
     finally:
         os.close(fd)
+
+
+def _read_fd(fd: int) -> tuple[bytes, os.stat_result]:
+    os.lseek(fd, 0, os.SEEK_SET)
+    with os.fdopen(os.dup(fd), "rb") as handle:
+        data = handle.read()
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise RuntimeError("Expected regular file")
+    return data, info
 
 
 def _stage_write_at(directory_fd: int, name: str, data: bytes, mode: int) -> str:
@@ -274,6 +288,20 @@ def _atomic_create_at(directory_fd: int, name: str, data: bytes, mode: int) -> N
         raise RuntimeError(f"Refusing existing file: {name}") from exc
     finally:
         os.unlink(temporary, dir_fd=directory_fd)
+
+
+def _exchange_paths_at(directory_fd: int, left: str, right: str) -> None:
+    """Atomically exchange two directory entries without a clobber gap."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise RuntimeError("Atomic path exchange is unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(directory_fd, os.fsencode(left), directory_fd, os.fsencode(right), 2) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), right)
+    os.fsync(directory_fd)
 
 
 def _fsync_tree(root: Path) -> None:
@@ -488,13 +516,13 @@ def _valid_install_manifest(manifest: object) -> bool:
     service = manifest.get("service")
     releases = manifest.get("releases")
     version = manifest.get("version")
-    service_version = type(version) is int and version in {3, 4, 5, 6}
-    expected_static = STATIC_FILES if version in {4, 6} else LEGACY_STATIC_FILES
+    service_version = type(version) is int and version in {3, 4, 5, 6, 7}
+    expected_static = STATIC_FILES if version == 7 else V6_STATIC_FILES if version in {4, 6} else LEGACY_STATIC_FILES
     registration = manifest.get("registration")
-    expected_keys = {"version", "static", "service", "releases"} | ({"registration"} if version == 6 else set())
+    expected_keys = {"version", "static", "service", "releases"} | ({"registration"} if version in {6, 7} else set())
     return not (
         type(version) is not int
-        or version not in {2, 3, 4, 5, 6}
+        or version not in {2, 3, 4, 5, 6, 7}
         or set(manifest) != (expected_keys if service_version else {"version", "static", "releases"})
         or not isinstance(static, dict)
         or set(static) != set(expected_static)
@@ -514,7 +542,7 @@ def _valid_install_manifest(manifest: object) -> bool:
                 or service["mode"] != SERVICE_MODE
             )
         )
-        or version == 6 and (
+        or version in {6, 7} and (
             not isinstance(registration, dict)
             or set(registration) != set(REGISTRATION_MODES)
             or any(
@@ -638,7 +666,7 @@ def _ensure_registration(root: Path, source: Path) -> dict:
     previous = None
     if (app / ROOT_MANIFEST).is_file() and not (app / ROOT_MANIFEST).is_symlink():
         manifest = _load_json_file(app / ROOT_MANIFEST, "install manifest")
-        if manifest.get("version") == 6 and isinstance(manifest.get("registration"), dict):
+        if manifest.get("version") in {6, 7} and isinstance(manifest.get("registration"), dict):
             previous = manifest["registration"]
             _validate_registration(root, previous)
             if previous["image"]["sha256"] != hashlib.sha256(data["image"]).hexdigest():
@@ -725,7 +753,7 @@ def _load_install(
     service = manifest.get("service")
     releases = manifest["releases"]
     version = manifest["version"]
-    modes = STATIC_MODES if version in {4, 6} else LEGACY_STATIC_MODES
+    modes = STATIC_MODES if version == 7 else V6_STATIC_MODES if version in {4, 6} else LEGACY_STATIC_MODES
     for name in static:
         target = app / name
         try:
@@ -754,12 +782,12 @@ def _load_install(
         service_absent = False
         service_hash = None
     service_record = service if isinstance(service, dict) else {}
-    allowed_service_hashes = {service_record["sha256"]} if version in {3, 4, 5, 6} else set()
+    allowed_service_hashes = {service_record["sha256"]} if version in {3, 4, 5, 6, 7} else set()
     if service_hash not in allowed_service_hashes and not (service_absent and (allow_missing_service or version == 2)):
         raise RuntimeError("Modified service file")
-    if expected_service is not None and (version not in {3, 4, 5, 6} or service_record["sha256"] != hashlib.sha256(expected_service).hexdigest()):
+    if expected_service is not None and (version not in {3, 4, 5, 6, 7} or service_record["sha256"] != hashlib.sha256(expected_service).hexdigest()):
         raise RuntimeError("Lifecycle protocol mismatch: service")
-    if version == 6:
+    if version in {6, 7}:
         _validate_registration(app.parents[2], manifest["registration"], allow_absent=allow_missing_registration)
     current = _load_json_file(app / CURRENT, "current pointer")
     if (
@@ -832,7 +860,8 @@ def _recover_activation(root: Path, app: Path) -> None:
         raise RuntimeError("Activation journal changed during validation")
     app_fd = _open_dir(app)
     try:
-        modes = STATIC_MODES if manifest["version"] in {4, 6} else LEGACY_STATIC_MODES
+        version = manifest["version"]
+        modes = STATIC_MODES if version == 7 else V6_STATIC_MODES if version in {4, 6} else LEGACY_STATIC_MODES
         for name, mode in modes.items():
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=app_fd)
             try:
@@ -923,7 +952,7 @@ def _normalize_xml_parts(prefix: bytes, document: bytes, suffix: bytes) -> tuple
     return prefix_text.encode("utf-8"), document_text, suffix_text.encode("utf-8")
 
 
-def gamelist_bytes(data: bytes | None, release_id: str, remove: bool = False) -> bytes:
+def gamelist_bytes(data: bytes | None, release_id: str, remove: bool = False, *, legacy_only: bool = False) -> bytes:
     prefix = b'<?xml version="1.0" encoding="utf-8"?>\n'
     suffix = b"\n"
     if data is not None:
@@ -937,27 +966,56 @@ def gamelist_bytes(data: bytes | None, release_id: str, remove: bool = False) ->
             raise RuntimeError("Unexpected gamelist.xml root")
     else:
         root = ET.Element("gameList")
-    matches = [game for game in root.findall("game") if game.findtext("path") in {LEGACY_APP_GAME_PATH, LEGACY_GAME_PATH}]
+    owned_paths = {LEGACY_APP_GAME_PATH, LEGACY_GAME_PATH} if legacy_only else {PYGAME_GAME_PATH, LEGACY_APP_GAME_PATH, LEGACY_GAME_PATH}
+    matches = [
+        game
+        for game in root.findall("game")
+        if any(child.tag == "path" and child.text in owned_paths for child in game)
+    ]
+    if not legacy_only:
+        fixed = {
+            "path": PYGAME_GAME_PATH,
+            "name": "Control Freak",
+            "desc": "Controller-first settings and management for Batocera.",
+            "genre": "Utility",
+            "image": "../../system/control-freak/app/image.png",
+            "developer": "Haku",
+            "publisher": "Haku",
+            "players": "1",
+        }
+        for game in matches:
+            fields: dict[str, str | None] = {}
+            malformed = bool(game.attrib or (game.text or "").strip() or (game.tail or "").strip())
+            for child in game:
+                if not isinstance(child.tag, str) or child.tag in fields or child.attrib or len(child) or (child.tail or "").strip():
+                    malformed = True
+                    break
+                fields[child.tag] = child.text
+            if malformed or any(fields.get(name) != value for name, value in fixed.items()) or set(fields) - set(fixed) - {"playcount", "lastplayed", "gametime", "lang"}:
+                raise RuntimeError("Malformed Control Freak gamelist entry")
     if len(matches) > 1 or matches and matches[0].findtext("name") != "Control Freak":
         raise RuntimeError("Refusing to replace an unknown gamelist entry")
     if remove and not matches:
         assert data is not None
         return data
-    if matches:
+    if remove:
         root.remove(matches[0])
-    if not remove:
-        game = ET.SubElement(root, "game")
+    else:
+        game = matches[0] if matches else ET.SubElement(root, "game")
         for key, value in {
-            "path": LEGACY_APP_GAME_PATH,
+            "path": PYGAME_GAME_PATH,
             "name": "Control Freak",
             "desc": "Controller-first settings and management for Batocera.",
             "genre": "Utility",
-            "image": "./control-freak/image.png",
+            "image": "../../system/control-freak/app/image.png",
             "developer": "Haku",
             "publisher": "Haku",
             "players": "1",
         }.items():
-            ET.SubElement(game, key).text = value
+            element = game.find(key)
+            if element is None:
+                element = ET.SubElement(game, key)
+            element.text = value
     ET.indent(root, space="\t")
     return prefix + ET.tostring(root, encoding="utf-8") + suffix
 
@@ -965,6 +1023,8 @@ def gamelist_bytes(data: bytes | None, release_id: str, remove: bool = False) ->
 def _gamelist_state(pygame_fd: int) -> tuple[bytes | None, int, os.stat_result | None]:
     try:
         data, info = _read_at(pygame_fd, "gamelist.xml")
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise RuntimeError("Refusing unsafe gamelist.xml")
         return data, info.st_mode & 0o777, info
     except FileNotFoundError:
         return None, 0o644, None
@@ -976,18 +1036,112 @@ def _same_file(left: os.stat_result | None, right: os.stat_result | None) -> boo
     return (left.st_dev, left.st_ino, left.st_size, left.st_mtime_ns) == (right.st_dev, right.st_ino, right.st_size, right.st_mtime_ns)
 
 
-def _replace_gamelist(pygame_fd: int, original: os.stat_result | None, data: bytes, mode: int) -> None:
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _retain_path_at(directory_fd: int, name: str, recovery_base: str = "gamelist.xml") -> str:
+    """Give a shared inode an independent durable recovery name."""
+    recovery = f".{recovery_base}.tmp-{secrets.token_hex(12)}"
+    os.link(name, recovery, src_dir_fd=directory_fd, dst_dir_fd=directory_fd, follow_symlinks=False)
+    os.fsync(directory_fd)
+    return recovery
+
+
+def _replace_gamelist(pygame_fd: int, original: os.stat_result | None, original_data: bytes | None, data: bytes, mode: int) -> None:
+    if original is None:
+        _atomic_create_at(pygame_fd, "gamelist.xml", data, mode)
+        return
+    original_fd = os.open("gamelist.xml", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=pygame_fd)
     try:
-        current = os.stat("gamelist.xml", dir_fd=pygame_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        current = None
-    if not _same_file(original, current):
-        raise RuntimeError("gamelist.xml changed during operation")
-    _atomic_write_at(pygame_fd, "gamelist.xml", data, mode)
+        held_data, held_info = _read_fd(original_fd)
+        if not _same_file(original, held_info) or held_data != original_data:
+            raise RuntimeError("gamelist.xml changed during operation")
+        _retain_path_at(pygame_fd, "gamelist.xml")
+        temporary = _stage_write_at(pygame_fd, "gamelist.xml", data, mode)
+        _retain_path_at(pygame_fd, temporary)
+        staged_info = os.stat(temporary, dir_fd=pygame_fd, follow_symlinks=False)
+        exchanged = False
+        try:
+            current = os.stat("gamelist.xml", dir_fd=pygame_fd, follow_symlinks=False)
+            if not _same_file(original, current):
+                raise RuntimeError("gamelist.xml changed during operation")
+            try:
+                _exchange_paths_at(pygame_fd, temporary, "gamelist.xml")
+                exchanged = True
+            except BaseException:
+                live_info = os.stat("gamelist.xml", dir_fd=pygame_fd, follow_symlinks=False)
+                exchanged = _same_inode(staged_info, live_info)
+                raise
+            displaced, displaced_info = _read_at(pygame_fd, temporary)
+            held_data, held_info = _read_fd(original_fd)
+            if not _same_file(original, displaced_info) or displaced != original_data or not _same_file(displaced_info, held_info) or held_data != displaced:
+                raise RuntimeError("gamelist.xml changed during operation")
+            os.fsync(pygame_fd)
+            exchanged = False
+            final_data, final_info = _read_fd(original_fd)
+            if not _same_file(held_info, final_info) or final_data != held_data:
+                raise RuntimeError("gamelist.xml changed during operation")
+        except BaseException:
+            if exchanged:
+                try:
+                    _exchange_paths_at(pygame_fd, temporary, "gamelist.xml")
+                    exchanged = False
+                except BaseException:
+                    raise
+            raise
+    finally:
+        os.close(original_fd)
+
+
+def _pygame_gamelist_snapshot(root: Path) -> tuple[bytes | None, int]:
+    _mkdirs_no_symlinks(root, LEGACY_APP_PARENT_REL)
+    pygame_fd = _open_owned_dir(root / LEGACY_APP_PARENT_REL)
+    try:
+        data, mode, _ = _gamelist_state(pygame_fd)
+        return data, mode
+    finally:
+        os.close(pygame_fd)
+
+
+def _restore_pygame_gamelist(root: Path, expected: tuple[bytes | None, int], previous: tuple[bytes | None, int]) -> None:
+    pygame_fd = _open_owned_dir(root / LEGACY_APP_PARENT_REL)
+    try:
+        current, mode, info = _gamelist_state(pygame_fd)
+        if current != expected[0]:
+            raise RuntimeError("gamelist.xml changed during compensation")
+        if previous[0] is None:
+            if current is not None:
+                replacement = gamelist_bytes(current, "compensation", remove=True)
+                _replace_gamelist(pygame_fd, info, current, replacement, mode)
+        else:
+            _replace_gamelist(pygame_fd, info, current, previous[0], previous[1] if previous[1] else mode)
+    finally:
+        os.close(pygame_fd)
+
+
+def _sync_pygame_gamelist(root: Path, remove: bool = False) -> bool:
+    pygame = root / LEGACY_APP_PARENT_REL
+    if remove and not pygame.exists():
+        return False
+    _mkdirs_no_symlinks(root, LEGACY_APP_PARENT_REL)
+    pygame_fd = _open_owned_dir(pygame)
+    try:
+        data, mode, info = _gamelist_state(pygame_fd)
+        if remove and data is None:
+            return False
+        replacement = gamelist_bytes(data, "registration", remove=remove)
+        if replacement == data:
+            return False
+        _replace_gamelist(pygame_fd, info, data, replacement, mode)
+        return True
+    finally:
+        os.close(pygame_fd)
 
 
 def _required(source: Path) -> dict[str, Path]:
     paths = {
+        "control-freak.pygame": source / "deploy/control-freak.pygame",
         "image.png": source / "assets/control-freak-image.png",
         "logo-proposal-1.png": source / "assets/control-freak-logo-1.png",
         "logo-proposal-2.png": source / "assets/control-freak-logo-2.png",
@@ -1572,7 +1726,7 @@ def _roll_forward_uninstall(root: Path, pygame_fd: int, services_fd: int) -> Non
     manifest = intent["manifest"]
     replacement = (root / APP_REL).exists()
     if not replacement:
-        if manifest["version"] in {3, 4, 5, 6}:
+        if manifest["version"] in {3, 4, 5, 6, 7}:
             try:
                 service_data, service_info = _read_at(services_fd, SERVICE_NAME)
             except FileNotFoundError:
@@ -1582,7 +1736,8 @@ def _roll_forward_uninstall(root: Path, pygame_fd: int, services_fd: int) -> Non
                     raise RuntimeError("Modified service file")
                 os.unlink(SERVICE_NAME, dir_fd=services_fd)
                 os.fsync(services_fd)
-        if manifest["version"] == 6:
+        _sync_pygame_gamelist(root, remove=True)
+        if manifest["version"] in {6, 7}:
             _remove_registration(root, manifest["registration"], allow_absent=True)
     shutil.rmtree(Path(quarantine), dir_fd=pygame_fd)
     os.fsync(pygame_fd)
@@ -1649,7 +1804,7 @@ def _recover_lifecycle(app: Path, services_fd: int | None) -> None:
     _update_registration(app.parents[2], before.get("registration", registration), registration, _installed_registration_bytes(app))
     _validate_registration(app.parents[2], registration)
     recovered = {
-        "version": 6,
+        "version": 7,
         "static": static,
         "service": {"name": SERVICE_NAME, "sha256": service_hash, "mode": SERVICE_MODE},
         "registration": registration,
@@ -1669,7 +1824,7 @@ def _update_lifecycle(app: Path, services_fd: int, stable: dict[str, bytes], ser
     before, _ = _load_install(app, allow_missing_service=True)
     service_hash = hashlib.sha256(service_data).hexdigest()
     after = {
-        "version": 6,
+        "version": 7,
         "static": {name: hashlib.sha256(data).hexdigest() for name, data in stable.items()},
         "service": {"name": SERVICE_NAME, "sha256": service_hash, "mode": SERVICE_MODE},
         "registration": registration,
@@ -1694,7 +1849,7 @@ def _update_lifecycle(app: Path, services_fd: int, stable: dict[str, bytes], ser
     try:
         _atomic_write_at(app_fd, LIFECYCLE_JOURNAL, _json_bytes({"version": 1, "before": before, "after": after}), 0o600)
         for name, data in stable.items():
-            if checksum(app / name) != after["static"][name] or (app / name).stat().st_mode & 0o777 != STATIC_MODES[name]:
+            if name not in before["static"] or checksum(app / name) != after["static"][name] or (app / name).stat().st_mode & 0o777 != STATIC_MODES[name]:
                 _atomic_write_at(app_fd, name, data, STATIC_MODES[name])
         for name in set(before["static"]) - set(stable):
             os.unlink(name, dir_fd=app_fd)
@@ -1713,7 +1868,13 @@ def _update_lifecycle(app: Path, services_fd: int, stable: dict[str, bytes], ser
 
 
 def _stable_bytes(required: dict[str, Path], app: Path) -> dict[str, bytes]:
-    return {name: path.read_bytes() for name, path in required.items()}
+    values = {name: path.read_bytes() for name, path in required.items()}
+    if values["control-freak.pygame"] != LAUNCHER_CODE.encode():
+        raise RuntimeError("Invalid Control Freak launcher")
+    root = app.parents[2]
+    if root != Path("/userdata"):
+        values["control-freak.pygame"] = LAUNCHER_CODE.replace("/userdata", str(root)).encode()
+    return values
 
 
 def _migrate_legacy_install(root: Path) -> None:
@@ -1728,7 +1889,7 @@ def _migrate_legacy_install(root: Path) -> None:
         _load_install(legacy, allow_missing_service=True)
         _prepare_state_directory(root)
         parent_fd = _open_dir(root / APP_PARENT_REL)
-        legacy_fd = _open_dir(root / LEGACY_APP_PARENT_REL)
+        legacy_fd = _open_owned_dir(root / LEGACY_APP_PARENT_REL)
         try:
             os.rename("control-freak", "app", src_dir_fd=legacy_fd, dst_dir_fd=parent_fd)
             os.fsync(legacy_fd)
@@ -1740,12 +1901,12 @@ def _migrate_legacy_install(root: Path) -> None:
         return
     gamelist = root / LEGACY_APP_PARENT_REL / "gamelist.xml"
     if gamelist.exists() and not gamelist.is_symlink():
-        legacy_fd = _open_dir(gamelist.parent)
+        legacy_fd = _open_owned_dir(gamelist.parent)
         try:
             data, info = _read_at(legacy_fd, gamelist.name)
-            replacement = gamelist_bytes(data, "migration", remove=True)
+            replacement = gamelist_bytes(data, "migration", remove=True, legacy_only=True)
             if replacement != data:
-                _replace_gamelist(legacy_fd, info, replacement, info.st_mode & 0o777)
+                _replace_gamelist(legacy_fd, info, data, replacement, info.st_mode & 0o777)
         finally:
             os.close(legacy_fd)
 
@@ -1760,7 +1921,7 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
     _runtime_dependencies(root)
     source = source.resolve()
     app = root / APP_REL
-    operations = [f"install release {release_id}", f"set channel {channel}", "register controlfreak system"]
+    operations = [f"install release {release_id}", f"set channel {channel}", "register in pygame system"]
     if dry_run:
         with tempfile.TemporaryDirectory() as temporary:
             snapshot = _snapshot_source(source, Path(temporary))
@@ -1781,6 +1942,9 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
     snapshot: Path | None = None
     application_staging: Path | None = None
     try:
+        native_pygame = root / LEGACY_APP_PARENT_REL
+        if native_pygame.exists() or native_pygame.is_symlink():
+            _pygame_gamelist_snapshot(root)
         snapshot = _snapshot_source(source, root / APP_PARENT_REL)
         staging, wanted = _source_manifest(snapshot, release_id, root / APP_PARENT_REL)
         _roll_forward_uninstall(root, pygame_fd, services_fd)
@@ -1789,7 +1953,7 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
         stable = _stable_bytes(required, app)
         if (app / ROOT_MANIFEST).is_file():
             installed = _load_json_file(app / ROOT_MANIFEST, "install manifest")
-            if installed.get("version") == 6 and isinstance(installed.get("registration"), dict):
+            if installed.get("version") in {6, 7} and isinstance(installed.get("registration"), dict):
                 if not (app / LIFECYCLE_JOURNAL).exists() and not (app / LIFECYCLE_JOURNAL).is_symlink():
                     _validate_registration(root, installed["registration"])
             else:
@@ -1834,7 +1998,7 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
                 os.chmod(destination, STATIC_MODES[name])
                 static[name] = checksum(destination)
             service_manifest = {"name": SERVICE_NAME, "sha256": hashlib.sha256(service_data).hexdigest(), "mode": SERVICE_MODE}
-            (application_staging / ROOT_MANIFEST).write_bytes(_json_bytes({"version": 6, "static": static, "service": service_manifest, "registration": registration, "releases": [release_id]}))
+            (application_staging / ROOT_MANIFEST).write_bytes(_json_bytes({"version": 7, "static": static, "service": service_manifest, "registration": registration, "releases": [release_id]}))
             (application_staging / CURRENT).write_bytes(_json_bytes({"version": 1, "release_id": release_id, "channel": channel}))
             _fsync_tree(application_staging)
             service_missing = False
@@ -1856,8 +2020,14 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
                         raise RuntimeError("Refusing unknown service file")
                 except FileNotFoundError:
                     _atomic_create_at(services_fd, SERVICE_NAME, service_data, SERVICE_MODE)
-            locked_out = _runtime_lockout(root, False)
+            pygame_registered = False
+            pygame_before = _pygame_gamelist_snapshot(root)
+            pygame_after = pygame_before
+            locked_out = False
             try:
+                pygame_registered = _sync_pygame_gamelist(root)
+                pygame_after = _pygame_gamelist_snapshot(root)
+                locked_out = _runtime_lockout(root, False)
                 _service_actions(root, "enable", "start")
             except BaseException as activation_error:
                 compensation_errors = []
@@ -1869,6 +2039,11 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
                 for action in ("stop", "disable"):
                     try:
                         _service_actions(root, action)
+                    except BaseException as exc:
+                        compensation_errors.append(exc)
+                if pygame_registered:
+                    try:
+                        _restore_pygame_gamelist(root, pygame_after, pygame_before)
                     except BaseException as exc:
                         compensation_errors.append(exc)
                 try:
@@ -1949,6 +2124,7 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
                 _atomic_write_at(app_fd, ROOT_MANIFEST, _json_bytes(manifest), 0o600)
             finally:
                 os.close(app_fd)
+        _sync_pygame_gamelist(root)
         _update_lifecycle(app, services_fd, stable, service_data, registration)
         manifest, current = _load_install(app, stable, service_data)
         _recover_shutdown_journal(root, True)
@@ -2140,7 +2316,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
         return []
     if pygame.is_symlink() or not pygame.is_dir():
         raise RuntimeError(f"Refusing unsafe install parent: {pygame}")
-    pygame_fd = _open_dir(pygame)
+    pygame_fd = _open_owned_dir(pygame)
     services_fd = None
     try:
         services_fd = _prepare_owned_directory(root, SERVICES_REL, create=False, normalize=not dry_run)
@@ -2151,6 +2327,9 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
         raise
     lock_fd = _lifecycle_lock(pygame_fd)
     try:
+        native_pygame = root / LEGACY_APP_PARENT_REL
+        if native_pygame.exists() or native_pygame.is_symlink():
+            _pygame_gamelist_snapshot(root)
         uninstall_intent = _uninstall_intent(root)
         planned_quarantine = None if uninstall_intent is None else uninstall_intent["quarantine"]
         if app.exists() or app.is_symlink():
@@ -2209,7 +2388,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
             manifest, current = uninstall_intent["manifest"], None
         if target != app:
             _read_shutdown_journal(root)
-        operations = [f"remove {APP_REL}", "unregister controlfreak system"]
+        operations = [f"remove {APP_REL}", "unregister from pygame system"]
         if dry_run:
             return operations
         # Recheck the complete owned tree before the first mutation.
@@ -2220,7 +2399,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
             _validate_uninstall_quarantine(target, uninstall_intent)
         service_info = None
         service_data = b""
-        if manifest["version"] in {3, 4, 5, 6}:
+        if manifest["version"] in {3, 4, 5, 6, 7}:
             try:
                 if services_fd is None:
                     raise FileNotFoundError
@@ -2252,7 +2431,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
             planned_quarantine = f".control-freak-remove-{secrets.token_hex(12)}"
             uninstall_intent = _uninstall_intent(root, planned_quarantine, manifest, target.stat())
         runtime_snapshot = None
-        if target == app and manifest["version"] in {3, 4, 5, 6}:
+        if target == app and manifest["version"] in {3, 4, 5, 6, 7}:
             assert current is not None
             try:
                 runtime_snapshot = _shutdown_runtime(root, current["release_id"], service_info is not None)
@@ -2262,6 +2441,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
         quarantine = None
         app_quarantined = False
         service_removed = False
+        pygame_unregistered = False
 
         try:
             if service_info is not None:
@@ -2280,6 +2460,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
                 os.unlink(SERVICE_NAME, dir_fd=services_fd)
                 service_removed = True
                 os.fsync(services_fd)
+            pygame_unregistered = _sync_pygame_gamelist(root, remove=True)
         except BaseException:
             if service_removed:
                 assert services_fd is not None
@@ -2289,13 +2470,15 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
                 assert quarantine is not None
                 os.rename(quarantine, "app", src_dir_fd=pygame_fd, dst_dir_fd=pygame_fd)
                 os.fsync(pygame_fd)
+            if pygame_unregistered:
+                _sync_pygame_gamelist(root)
             if runtime_snapshot is not None:
                 _restore_runtime(root, runtime_snapshot, service_info is not None)
             _clear_uninstall_intent(root)
             raise
         if runtime_snapshot is not None:
             _clear_shutdown_journal(root)
-        if manifest["version"] == 6:
+        if manifest["version"] in {6, 7}:
             _remove_registration(root, manifest["registration"], allow_absent=True)
         shutil.rmtree(Path(target.name), dir_fd=pygame_fd, ignore_errors=True)
         if target.exists():

@@ -187,6 +187,7 @@ def _file_entry(item: object) -> dict:
     allowed = (
         path.as_posix() in {
             "control-freak-release/deploy/control_freak",
+            "control-freak-release/deploy/control-freak.pygame",
             "control-freak-release/deploy/install_batocera.py", "control-freak-release/deploy/release-public.pem",
             "control-freak-release/deploy/release-trust.json", "control-freak-release/deploy/release-trust.sig",
             "control-freak-release/assets/control-freak-image.png",
@@ -194,7 +195,7 @@ def _file_entry(item: object) -> dict:
         or re.fullmatch(r"control-freak-release/assets/control-freak-logo-[1-6]\.png", path.as_posix()) is not None
         or path.as_posix().startswith("control-freak-release/src/control_freak/")
     )
-    if path.is_absolute() or len(path.parts) < 3 or any(part in {"", ".", ".."} for part in path.parts) or not allowed or not 0 <= item["size"] <= MAX_EXPANDED_BYTES or not SHA256.fullmatch(item["sha256"]) or item["mode"] not in {0o444, 0o644, 0o755}:
+    if path.is_absolute() or len(path.parts) < 3 or any(part in {"", ".", ".."} for part in path.parts) or not allowed or not 0 <= item["size"] <= MAX_EXPANDED_BYTES or not SHA256.fullmatch(item["sha256"]) or item["mode"] not in {0o444, 0o644, 0o755} or path.as_posix() == "control-freak-release/deploy/control-freak.pygame" and item["mode"] != 0o644:
         raise UpdateError("Invalid signed package file")
     return item
 

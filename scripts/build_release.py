@@ -24,7 +24,7 @@ def _canonical(value: dict) -> bytes:
 
 def _sources(source: Path) -> list[Path]:
     fixed = [
-        "deploy/control_freak", "deploy/install_batocera.py",
+        "deploy/control_freak", "deploy/control-freak.pygame", "deploy/install_batocera.py",
         "deploy/release-public.pem", "deploy/release-trust.json", "deploy/release-trust.sig",
         "assets/control-freak-image.png", *[f"assets/control-freak-logo-{number}.png" for number in range(1, 7)],
     ]

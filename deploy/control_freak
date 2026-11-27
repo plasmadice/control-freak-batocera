@@ -24,7 +24,7 @@ PYTHON = "/usr/bin/python3"
 START_STOP_DAEMON = "/sbin/start-stop-daemon"
 SERVICE_CODE = "import os,runpy,sys;sys.path.insert(0,'/proc/self/fd/'+os.environ['CONTROL_FREAK_BUNDLE_FD']);runpy.run_module('control_freak.service',run_name='__main__')"
 COMMAND = (PYTHON, "-I", "-B", "-c", SERVICE_CODE)
-STATIC_MODES = {"image.png": 0o644, **{f"logo-proposal-{number}.png": 0o644 for number in range(1, 7)}, "install_batocera.py": 0o644}
+STATIC_MODES = {"control-freak.pygame": 0o644, "image.png": 0o644, **{f"logo-proposal-{number}.png": 0o644 for number in range(1, 7)}, "install_batocera.py": 0o644}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 PUBLIC_KEY_PEM = b"__CONTROL_FREAK_RELEASE_PUBLIC_KEY__"
 OPENSSL = "/usr/bin/openssl"
@@ -179,6 +179,63 @@ def owned_gamelist(path: Path) -> bool:
     return all(fields.get(name) == value for name, value in fixed.items()) and set(fields) <= set(fixed) | {"playcount", "lastplayed", "gametime", "lang"}
 
 
+def native_pygame_registered(data: bytes) -> bool:
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return False
+    if root.tag != "gameList":
+        return False
+    matches = [game for game in root.findall("game") if game.findtext("path") == "../../system/control-freak/app/control-freak.pygame"]
+    if len(matches) != 1:
+        return False
+    game = matches[0]
+    if game.attrib or (game.text or "").strip() or (game.tail or "").strip():
+        return False
+    fields: dict[str, str | None] = {}
+    for child in game:
+        if not isinstance(child.tag, str) or child.tag in fields or child.attrib or len(child) or (child.tail or "").strip():
+            return False
+        fields[child.tag] = child.text
+    fixed = {
+        "path": "../../system/control-freak/app/control-freak.pygame",
+        "name": "Control Freak",
+        "desc": "Controller-first settings and management for Batocera.",
+        "genre": "Utility",
+        "image": "../../system/control-freak/app/image.png",
+        "developer": "Haku",
+        "publisher": "Haku",
+        "players": "1",
+    }
+    return all(fields.get(name) == value for name, value in fixed.items()) and set(fields) <= set(fixed) | {"playcount", "lastplayed", "gametime", "lang"}
+
+
+def native_pygame_gamelist(userdata: Path) -> bytes:
+    directory_fd = os.open("/" if userdata.is_absolute() else ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parts = userdata.parts[1:] if userdata.is_absolute() else userdata.parts
+        for part in (*parts, "roms", "pygame"):
+            child_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        directory_info = os.fstat(directory_fd)
+        if directory_info.st_uid != os.geteuid() or directory_info.st_mode & 0o022:
+            raise RuntimeError("Modified Control Freak registration")
+        file_fd = os.open("gamelist.xml", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        try:
+            file_info = os.fstat(file_fd)
+            if not stat.S_ISREG(file_info.st_mode) or file_info.st_uid != os.geteuid() or file_info.st_mode & 0o022:
+                raise RuntimeError("Modified Control Freak registration")
+            with os.fdopen(os.dup(file_fd), "rb") as handle:
+                return handle.read()
+        finally:
+            os.close(file_fd)
+    except OSError as exc:
+        raise RuntimeError("Modified Control Freak registration") from exc
+    finally:
+        os.close(directory_fd)
+
+
 def trusted_control_plane(releases: list[str], static: dict, registration: dict) -> bool:
     service_hash = hashlib.sha256(canonical_wrapper()).hexdigest()
     for release in releases:
@@ -199,11 +256,14 @@ def trusted_control_plane(releases: list[str], static: dict, registration: dict)
                 or any(not isinstance(item, dict) or set(item) != {"path", "sha256", "mode"} for item in source)
             ):
                 continue
-            source_hashes = {item["path"]: item["sha256"] for item in source}
+            source_records = {item["path"]: (item["sha256"], item["mode"]) for item in source}
+            launcher = (APP / "control-freak.pygame").read_bytes()
+            canonical_launcher = launcher.replace(str(APP.parents[2]).encode(), b"/userdata", 1)
             if (
-                len(source_hashes) != len(source)
-                or source_hashes.get("deploy/install_batocera.py") != static["install_batocera.py"]
-                or source_hashes.get("assets/control-freak-image.png") != registration["image"]["sha256"]
+                len(source_records) != len(source)
+                or source_records.get("deploy/install_batocera.py") != (static["install_batocera.py"], 0o644)
+                or source_records.get("deploy/control-freak.pygame") != (hashlib.sha256(canonical_launcher).hexdigest(), 0o644)
+                or source_records.get("assets/control-freak-image.png") != (registration["image"]["sha256"], 0o644)
             ):
                 continue
             verify_signature(statement, signature)
@@ -225,7 +285,7 @@ def validated_release() -> tuple[str, int]:
         set(current) != {"version", "release_id", "channel"} or type(current.get("version")) is not int or current["version"] != 1
         or type(release) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", release)
         or current.get("channel") not in {"stable", "nightly"}
-        or set(manifest) != {"version", "static", "service", "registration", "releases"} or type(manifest.get("version")) is not int or manifest["version"] != 6
+        or set(manifest) != {"version", "static", "service", "registration", "releases"} or type(manifest.get("version")) is not int or manifest["version"] != 7
         or not isinstance(static, dict) or set(static) != set(STATIC_MODES) or any(type(value) is not str or not SHA256.fullmatch(value) for value in static.values())
         or not isinstance(releases, list) or release not in releases or any(type(value) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", value) for value in releases) or len(releases) != len(set(releases))
         or not isinstance(service, dict) or set(service) != {"name", "sha256", "mode"} or service.get("name") != "control_freak" or type(service.get("sha256")) is not str or not SHA256.fullmatch(service["sha256"]) or type(service.get("mode")) is not int or service["mode"] != 0o755
@@ -256,6 +316,8 @@ def validated_release() -> tuple[str, int]:
             raise RuntimeError("Modified Control Freak registration") from exc
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o777 != registration[name]["mode"] or checksum(target) != registration[name]["sha256"] and (name != "gamelist" or not owned_gamelist(target)):
             raise RuntimeError("Modified Control Freak registration")
+    if not native_pygame_registered(native_pygame_gamelist(userdata)):
+        raise RuntimeError("Modified Control Freak registration")
     root = APP / "releases" / release
     if root.is_symlink() or not root.is_dir():
         raise RuntimeError("Invalid Control Freak release directory")

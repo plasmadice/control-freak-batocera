@@ -164,14 +164,17 @@ def test_signed_metadata_requires_supported_deduplicated_batocera_subset(monkeyp
         updates.verify_metadata(canonical(value), b"signature", b"key", release("v1.2.3", False)["assets"], python_version=(3, 12), batocera_version="43")
 
 
-def test_signed_package_rejects_obsolete_rom_launcher() -> None:
+def test_signed_package_accepts_application_launcher_only_with_canonical_mode() -> None:
+    item = {
+        "path": "control-freak-release/deploy/control-freak.pygame",
+        "size": 1,
+        "sha256": "a" * 64,
+        "mode": 0o644,
+    }
+    assert updates._file_entry(item) == item
+    item["mode"] = 0o755
     with pytest.raises(updates.UpdateError, match="Invalid signed package file"):
-        updates._file_entry({
-            "path": "control-freak-release/deploy/control-freak.pygame",
-            "size": 1,
-            "sha256": "a" * 64,
-            "mode": 0o755,
-        })
+        updates._file_entry(item)
 
 
 def test_safe_extract_rejects_traversal_links_duplicates_and_unlisted_files(tmp_path: Path) -> None:

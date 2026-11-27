@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import runpy
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -112,7 +113,7 @@ def test_launcher_boundary_requires_owned_nonwritable_app_ancestors(tmp_path: Pa
 
 def make_legacy_v3(root: Path) -> Path:
     application = root / installer.LEGACY_APP_REL
-    application.parent.mkdir(parents=True)
+    application.parent.mkdir(parents=True, exist_ok=True)
     app(root).rename(application)
     launcher = application / installer.LEGACY_LAUNCHER
     launcher.write_text("#!/usr/bin/python3\n")
@@ -607,8 +608,8 @@ def test_install_registers_versioned_custom_system_application(tmp_path: Path, s
     operations = install(tmp_path, source_root, "0.1.0-test", "stable")
 
     root = app(tmp_path)
-    assert not (root / "control-freak.pygame").exists()
-    assert json.loads((root / installer.ROOT_MANIFEST).read_text())["version"] == 6
+    assert (root / "control-freak.pygame").is_file()
+    assert json.loads((root / installer.ROOT_MANIFEST).read_text())["version"] == 7
     assert (root / "image.png").is_file()
     assert (root / "releases/0.1.0-test/control_freak/app.py").is_file()
     assert current(tmp_path) == {"channel": "stable", "release_id": "0.1.0-test", "version": 1}
@@ -617,22 +618,45 @@ def test_install_registers_versioned_custom_system_application(tmp_path: Path, s
     assert registered(tmp_path)
 
 
-def test_install_uses_root_owned_custom_system_without_rom_executables(tmp_path: Path, source_root: Path) -> None:
+def test_upgrade_from_version_six_registers_native_pygame(tmp_path: Path, source_root: Path) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    application = app(tmp_path)
+    manifest_path = application / installer.ROOT_MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    manifest["version"] = 6
+    manifest["static"].pop("control-freak.pygame")
+    (application / "control-freak.pygame").unlink()
+    installer._sync_pygame_gamelist(tmp_path, remove=True)
+    manifest_path.write_bytes(installer._json_bytes(manifest))
+
+    install(tmp_path, source_root, "two", "stable")
+
+    upgraded = json.loads(manifest_path.read_text())
+    assert upgraded["version"] == 7
+    assert (application / "control-freak.pygame").is_file()
+    games = ET.parse(tmp_path / "roms/pygame/gamelist.xml").getroot().findall("game")
+    assert [game.findtext("path") for game in games].count(installer.PYGAME_GAME_PATH) == 1
+
+
+def test_install_uses_native_pygame_system_without_rom_executables(tmp_path: Path, source_root: Path) -> None:
     install(tmp_path, source_root, "one", "stable")
 
     application = tmp_path / "system/control-freak/app"
     library = tmp_path / "system/control-freak/library"
     overlay = tmp_path / "system/configs/emulationstation/es_systems_control_freak.cfg"
     assert (application / "releases/one/control_freak/app.py").is_file()
-    assert not (tmp_path / "roms").exists()
     assert overlay.read_text() == installer.SYSTEMS_OVERLAY
-    assert "<theme>pygame</theme>" in overlay.read_text()
+    assert ET.parse(overlay).getroot().find("system") is None
     assert (library / "Control Freak.controlfreak").read_bytes() == b""
     assert (library / "Control Freak.controlfreak").stat().st_mode & 0o111 == 0
     game = ET.parse(library / "gamelist.xml").getroot().find("game")
     assert game is not None
     assert game.findtext("path") == "./Control Freak.controlfreak"
     assert game.findtext("image") == "./images/control-freak.png"
+    native_game = ET.parse(tmp_path / "roms/pygame/gamelist.xml").getroot().find("game")
+    assert native_game is not None
+    assert native_game.findtext("path") == installer.PYGAME_GAME_PATH
+    assert native_game.findtext("image") == "../../system/control-freak/app/image.png"
     manifest = json.loads((application / installer.ROOT_MANIFEST).read_text())
     assert manifest["registration"] == {
         "overlay": {"sha256": installer.checksum(overlay), "mode": 0o644},
@@ -646,14 +670,14 @@ def test_update_replaces_owned_ports_theme_registration(tmp_path: Path, source_r
     install(tmp_path, source_root, "one", "stable")
     application = app(tmp_path)
     overlay = tmp_path / installer.OVERLAY_REL
-    overlay.write_text(overlay.read_text().replace("<theme>pygame</theme>", "<theme>ports</theme>"))
+    overlay.write_text("<systemList><system /></systemList>\n")
     manifest = json.loads((application / installer.ROOT_MANIFEST).read_text())
     manifest["registration"]["overlay"]["sha256"] = installer.checksum(overlay)
     (application / installer.ROOT_MANIFEST).write_bytes(installer._json_bytes(manifest))
 
     install(tmp_path, source_root, "two", "stable")
 
-    assert "<theme>pygame</theme>" in overlay.read_text()
+    assert overlay.read_text() == installer.SYSTEMS_OVERLAY
     manifest = json.loads((application / installer.ROOT_MANIFEST).read_text())
     assert manifest["registration"]["overlay"]["sha256"] == installer.checksum(overlay)
 
@@ -662,7 +686,7 @@ def test_update_recovers_crash_after_registration_migration(tmp_path: Path, sour
     install(tmp_path, source_root, "one", "stable")
     application = app(tmp_path)
     overlay = tmp_path / installer.OVERLAY_REL
-    overlay.write_text(overlay.read_text().replace("<theme>pygame</theme>", "<theme>ports</theme>"))
+    overlay.write_text("<systemList><system /></systemList>\n")
     manifest = json.loads((application / installer.ROOT_MANIFEST).read_text())
     manifest["registration"]["overlay"]["sha256"] = installer.checksum(overlay)
     (application / installer.ROOT_MANIFEST).write_bytes(installer._json_bytes(manifest))
@@ -679,7 +703,7 @@ def test_update_recovers_crash_after_registration_migration(tmp_path: Path, sour
 
     monkeypatch.setattr(installer, "_atomic_write_at", real_atomic_write)
     install(tmp_path, source_root, "two", "stable")
-    assert "<theme>pygame</theme>" in overlay.read_text()
+    assert overlay.read_text() == installer.SYSTEMS_OVERLAY
     assert not (application / installer.LIFECYCLE_JOURNAL).exists()
 
 
@@ -691,8 +715,8 @@ def test_update_migrates_v3_from_legacy_rom_root(tmp_path: Path, source_root: Pa
 
     assert not launcher.exists()
     manifest = json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())
-    assert manifest["version"] == 6
-    assert installer.LEGACY_LAUNCHER not in manifest["static"]
+    assert manifest["version"] == 7
+    assert installer.LEGACY_LAUNCHER in manifest["static"]
     assert current(tmp_path)["release_id"] == "two"
     assert manifest["releases"] == ["one", "two"]
 
@@ -711,7 +735,10 @@ def test_legacy_migration_removes_only_owned_pygame_entry(tmp_path: Path, source
     install(tmp_path, source_root, "two", "stable")
 
     games = ET.parse(gamelist).getroot().findall("game")
-    assert [(game.findtext("path"), game.findtext("name")) for game in games] == [("./other.pygame", "Other")]
+    assert [(game.findtext("path"), game.findtext("name")) for game in games] == [
+        ("./other.pygame", "Other"),
+        (installer.PYGAME_GAME_PATH, "Control Freak"),
+    ]
 
 
 def test_legacy_migration_recovers_crash_after_rename(tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -734,7 +761,8 @@ def test_legacy_migration_recovers_crash_after_rename(tmp_path: Path, source_roo
         install(tmp_path, source_root, "two", "stable")
     monkeypatch.setattr(installer.os, "rename", real_rename)
     install(tmp_path, source_root, "two", "stable")
-    assert ET.parse(gamelist).getroot().findall("game") == []
+    games = ET.parse(gamelist).getroot().findall("game")
+    assert [game.findtext("path") for game in games] == [installer.PYGAME_GAME_PATH]
 
 
 def test_install_refuses_registration_collision_without_rom_content(tmp_path: Path, source_root: Path) -> None:
@@ -788,6 +816,376 @@ def test_update_accepts_emulationstation_gamelist_play_metadata(tmp_path: Path, 
     assert game.findtext("lastplayed") == "20261126T170445"
     assert game.findtext("gametime") == "2430"
     assert game.findtext("lang") == "en"
+
+    native = tmp_path / "roms/pygame/gamelist.xml"
+    native_tree = ET.parse(native)
+    native_game = native_tree.getroot().find("game")
+    assert native_game is not None
+    ET.SubElement(native_game, "playcount").text = "3"
+    other = ET.Element("game")
+    ET.SubElement(other, "path").text = "./other.pygame"
+    ET.SubElement(other, "name").text = "Other"
+    native_tree.getroot().insert(0, other)
+    native_tree.write(native, encoding="utf-8", xml_declaration=True)
+
+    install(tmp_path, source_root, "three", "stable")
+
+    native_games = ET.parse(native).getroot().findall("game")
+    assert [item.findtext("name") for item in native_games] == ["Other", "Control Freak"]
+    assert native_games[1].findtext("playcount") == "3"
+
+
+def test_shared_gamelist_refuses_unsafe_mode_on_install(tmp_path: Path, source_root: Path) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList><game><path>./other.pygame</path><name>Other</name></game></gameList>\n")
+    gamelist.chmod(0o666)
+
+    with pytest.raises(RuntimeError, match="unsafe gamelist.xml"):
+        install(tmp_path, source_root, "one", "stable")
+
+    assert gamelist.stat().st_mode & 0o777 == 0o666
+    assert not app(tmp_path).exists()
+
+
+def test_shared_gamelist_allows_batocera_roms_parent_mode(tmp_path: Path, source_root: Path) -> None:
+    roms = tmp_path / "roms"
+    pygame = roms / "pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    roms.chmod(0o2770)
+    pygame.chmod(0o2755)
+
+    install(tmp_path, source_root, "one", "stable")
+
+    assert (pygame / "gamelist.xml").is_file()
+
+
+def test_shared_gamelist_refuses_writable_pygame_parent(tmp_path: Path, source_root: Path) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    pygame.chmod(0o777)
+
+    with pytest.raises(RuntimeError, match="unsafe launcher trust boundary"):
+        install(tmp_path, source_root, "one", "stable")
+
+    assert not app(tmp_path).exists()
+
+
+def test_shared_gamelist_concurrent_write_is_not_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList><game><path>./one.pygame</path><name>One</name></game></gameList>\n")
+    gamelist.chmod(0o644)
+    concurrent = b"<gameList><game><path>./two.pygame</path><name>Two</name></game></gameList>\n"
+    real = installer._exchange_paths_at
+    injected = False
+
+    def exchange_with_concurrent_change(directory_fd: int, left: str, right: str) -> None:
+        nonlocal injected
+        if right == "gamelist.xml" and not injected:
+            injected = True
+            gamelist.write_bytes(concurrent)
+        real(directory_fd, left, right)
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", exchange_with_concurrent_change)
+    with pytest.raises(RuntimeError, match="gamelist.xml changed during operation"):
+        installer._sync_pygame_gamelist(tmp_path)
+    assert gamelist.read_bytes() == concurrent
+
+
+def test_shared_gamelist_atomic_replacement_is_not_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList><game><path>./one.pygame</path><name>One</name></game></gameList>\n")
+    gamelist.chmod(0o644)
+    concurrent = b"<gameList><game><path>./two.pygame</path><name>Two</name></game></gameList>\n"
+    real = installer._exchange_paths_at
+    injected = False
+
+    def exchange_with_concurrent_replacement(directory_fd: int, left: str, right: str) -> None:
+        nonlocal injected
+        if right == "gamelist.xml" and not injected:
+            injected = True
+            replacement = pygame / "concurrent.xml"
+            replacement.write_bytes(concurrent)
+            os.replace(replacement, gamelist)
+        real(directory_fd, left, right)
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", exchange_with_concurrent_replacement)
+    with pytest.raises(RuntimeError, match="gamelist.xml changed during operation"):
+        installer._sync_pygame_gamelist(tmp_path)
+    assert gamelist.read_bytes() == concurrent
+
+
+def test_shared_gamelist_atomic_replacement_survives_post_exchange_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    original = b"<gameList><game><path>./one.pygame</path><name>One</name></game></gameList>\n"
+    gamelist.write_bytes(original)
+    gamelist.chmod(0o644)
+    candidate = installer.gamelist_bytes(original, "registration")
+    concurrent = b"<gameList><game><path>./two.pygame</path><name>Two</name></game></gameList>\n"
+    real_exchange = installer._exchange_paths_at
+    real_fsync = os.fsync
+    fail_directory_fsync = False
+    injected = False
+
+    def fsync_with_failure(fd: int) -> None:
+        nonlocal injected
+        if fail_directory_fsync:
+            if not injected:
+                injected = True
+                replacement = pygame / "concurrent.xml"
+                replacement.write_bytes(concurrent)
+                os.replace(replacement, gamelist)
+            raise OSError("injected post-exchange fsync failure")
+        real_fsync(fd)
+
+    def exchange_with_concurrent_replacement(directory_fd: int, left: str, right: str) -> None:
+        nonlocal fail_directory_fsync
+        if right == "gamelist.xml":
+            fail_directory_fsync = True
+        real_exchange(directory_fd, left, right)
+
+    monkeypatch.setattr(os, "fsync", fsync_with_failure)
+    monkeypatch.setattr(installer, "_exchange_paths_at", exchange_with_concurrent_replacement)
+    with pytest.raises(OSError, match="injected post-exchange fsync failure"):
+        installer._sync_pygame_gamelist(tmp_path)
+    survivors = [gamelist, *pygame.glob(".gamelist.xml.tmp-*")]
+    assert any(path.read_bytes() == concurrent for path in survivors)
+    assert any(path.read_bytes() == original for path in survivors)
+    assert any(path.read_bytes() == candidate for path in survivors)
+
+
+def test_shared_gamelist_open_writer_is_named_after_final_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList><game><path>./one.pygame</path><name>One</name></game></gameList>\n")
+    gamelist.chmod(0o644)
+    concurrent = b"<gameList><game><path>./two.pygame</path><name>Two</name></game></gameList>\n"
+    writer = os.open(gamelist, os.O_WRONLY)
+    real_read_fd = installer._read_fd
+    reads = 0
+
+    def read_with_late_write(fd: int) -> tuple[bytes, os.stat_result]:
+        nonlocal reads
+        result = real_read_fd(fd)
+        reads += 1
+        if reads == 3:
+            os.ftruncate(writer, 0)
+            os.write(writer, concurrent)
+            os.fsync(writer)
+        return result
+
+    monkeypatch.setattr(installer, "_read_fd", read_with_late_write)
+    try:
+        installer._sync_pygame_gamelist(tmp_path)
+    finally:
+        os.close(writer)
+    assert any(path.read_bytes() == concurrent for path in pygame.glob(".gamelist.xml.tmp-*"))
+
+
+def test_shared_gamelist_displaced_replacement_cannot_orphan_late_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList><game><path>./one.pygame</path><name>One</name></game></gameList>\n")
+    gamelist.chmod(0o644)
+    concurrent = b"<gameList><game><path>./two.pygame</path><name>Two</name></game></gameList>\n"
+    writer = os.open(gamelist, os.O_WRONLY)
+    real_read_fd = installer._read_fd
+    reads = 0
+
+    def read_with_displaced_replacement(fd: int) -> tuple[bytes, os.stat_result]:
+        nonlocal reads
+        result = real_read_fd(fd)
+        reads += 1
+        if reads == 3:
+            displaced = next(pygame.glob(".gamelist.xml.tmp-*"))
+            competitor = pygame / "competitor.xml"
+            competitor.write_bytes(b"COMPETITOR")
+            os.replace(competitor, displaced)
+            os.ftruncate(writer, 0)
+            os.write(writer, concurrent)
+            os.fsync(writer)
+        return result
+
+    monkeypatch.setattr(installer, "_read_fd", read_with_displaced_replacement)
+    try:
+        installer._sync_pygame_gamelist(tmp_path)
+    finally:
+        os.close(writer)
+    survivors = [gamelist, *pygame.glob(".gamelist.xml.tmp-*")]
+    assert any(path.read_bytes() == concurrent for path in survivors)
+
+
+def test_activation_restore_preserves_late_writer_to_existing_gamelist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    expected = b"<gameList><game><path>./control-freak.pygame</path></game></gameList>\n"
+    previous = b"<gameList><game><path>./other.pygame</path></game></gameList>\n"
+    concurrent = b"<gameList><game><path>./late.pygame</path></game></gameList>\n"
+    gamelist.write_bytes(expected)
+    gamelist.chmod(0o644)
+    writer = os.open(gamelist, os.O_WRONLY)
+    real_exchange = installer._exchange_paths_at
+    injected = False
+
+    def exchange_with_late_writer(directory_fd: int, left: str, right: str) -> None:
+        nonlocal injected
+        real_exchange(directory_fd, left, right)
+        if right == "gamelist.xml" and not injected:
+            injected = True
+            os.ftruncate(writer, 0)
+            os.write(writer, concurrent)
+            os.fsync(writer)
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", exchange_with_late_writer)
+    try:
+        with pytest.raises(RuntimeError, match="gamelist.xml changed during operation"):
+            installer._restore_pygame_gamelist(tmp_path, (expected, 0o644), (previous, 0o644))
+    finally:
+        os.close(writer)
+    survivors = [gamelist, *pygame.glob(".gamelist.xml.tmp-*")]
+    assert any(path.read_bytes() == concurrent for path in survivors)
+
+
+def test_activation_restore_preserves_late_writer_when_previous_gamelist_was_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    expected = installer.gamelist_bytes(None, "registration")
+    concurrent = b"<gameList><game><path>./late.pygame</path></game></gameList>\n"
+    gamelist.write_bytes(expected)
+    gamelist.chmod(0o644)
+    writer = os.open(gamelist, os.O_WRONLY)
+    real_exchange = installer._exchange_paths_at
+    injected = False
+
+    def exchange_with_late_writer(directory_fd: int, left: str, right: str) -> None:
+        nonlocal injected
+        real_exchange(directory_fd, left, right)
+        if right == "gamelist.xml" and not injected:
+            injected = True
+            os.ftruncate(writer, 0)
+            os.write(writer, concurrent)
+            os.fsync(writer)
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", exchange_with_late_writer)
+    try:
+        with pytest.raises(RuntimeError, match="gamelist.xml changed during operation"):
+            installer._restore_pygame_gamelist(tmp_path, (expected, 0o644), (None, 0o644))
+    finally:
+        os.close(writer)
+    survivors = [path for path in [gamelist, *pygame.glob(".gamelist.xml.tmp-*")] if path.exists()]
+    assert any(path.read_bytes() == concurrent for path in survivors)
+    assert gamelist.exists()
+    assert installer.PYGAME_GAME_PATH not in gamelist.read_text()
+
+
+def test_shared_gamelist_open_writer_survives_exchange_fsync_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList><game><path>./one.pygame</path><name>One</name></game></gameList>\n")
+    gamelist.chmod(0o644)
+    concurrent = b"<gameList><game><path>./two.pygame</path><name>Two</name></game></gameList>\n"
+    writer = os.open(gamelist, os.O_WRONLY)
+    real_exchange = installer._exchange_paths_at
+    real_fsync = os.fsync
+    injected = False
+
+    def exchange_with_late_write(directory_fd: int, left: str, right: str) -> None:
+        nonlocal injected
+        real_exchange(directory_fd, left, right)
+        if right == "gamelist.xml" and not injected:
+            injected = True
+            os.ftruncate(writer, 0)
+            os.write(writer, concurrent)
+            real_fsync(writer)
+
+    def fsync_with_exchange_failure(fd: int) -> None:
+        if injected and stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("injected exchange directory fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", exchange_with_late_write)
+    monkeypatch.setattr(os, "fsync", fsync_with_exchange_failure)
+    try:
+        with pytest.raises(OSError, match="injected exchange directory fsync failure"):
+            installer._sync_pygame_gamelist(tmp_path)
+    finally:
+        os.close(writer)
+    assert gamelist.read_bytes() == concurrent
+
+
+def test_shared_gamelist_failed_exchange_rollback_preserves_displaced_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList><game><path>./one.pygame</path><name>One</name></game></gameList>\n")
+    gamelist.chmod(0o644)
+    concurrent = b"<gameList><game><path>./two.pygame</path><name>Two</name></game></gameList>\n"
+    real = installer._exchange_paths_at
+    exchanges = 0
+
+    def exchange_with_failed_rollback(directory_fd: int, left: str, right: str) -> None:
+        nonlocal exchanges
+        exchanges += 1
+        if exchanges == 1:
+            gamelist.write_bytes(concurrent)
+            real(directory_fd, left, right)
+            return
+        raise OSError("injected rollback failure")
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", exchange_with_failed_rollback)
+    with pytest.raises(OSError, match="injected rollback failure"):
+        installer._sync_pygame_gamelist(tmp_path)
+    assert any(path.read_bytes() == concurrent for path in pygame.glob(".gamelist.xml.tmp-*"))
+
+
+@pytest.mark.parametrize(
+    "controlled",
+    [
+        f'<game bad="1"><path>{installer.PYGAME_GAME_PATH}</path><name>Control Freak</name></game>',
+        f'<game><path>{installer.PYGAME_GAME_PATH}</path><name>Control Freak</name><unknown>x</unknown></game>',
+        f'<game><path>{installer.PYGAME_GAME_PATH}</path><path>./other.pygame</path><name>Control Freak</name></game>',
+        f'<game><path>{installer.PYGAME_GAME_PATH}</path><name><nested>Control Freak</nested></name></game>',
+    ],
+)
+def test_shared_gamelist_refuses_malformed_controlled_entry(controlled: str) -> None:
+    data = f"<gameList>{controlled}</gameList>\n".encode()
+
+    with pytest.raises(RuntimeError, match="Malformed Control Freak gamelist entry"):
+        installer.gamelist_bytes(data, "registration")
 
 
 def test_update_refuses_gamelist_fixed_metadata_drift(tmp_path: Path, source_root: Path) -> None:
@@ -882,8 +1280,15 @@ def test_registration_manifest_is_exact_schema(tmp_path: Path, source_root: Path
 def test_uninstall_removes_every_owned_registration_file(tmp_path: Path, source_root: Path) -> None:
     install(tmp_path, source_root, "one", "stable")
     paths = list(installer._registration_paths(tmp_path).values())
+    native = tmp_path / "roms/pygame/gamelist.xml"
+    tree = ET.parse(native)
+    other = ET.SubElement(tree.getroot(), "game")
+    ET.SubElement(other, "path").text = "./other.pygame"
+    ET.SubElement(other, "name").text = "Other"
+    tree.write(native, encoding="utf-8", xml_declaration=True)
     uninstall(tmp_path)
     assert all(not path.exists() for path in paths)
+    assert [game.findtext("name") for game in ET.parse(native).getroot().findall("game")] == ["Other"]
 
 
 def test_library_contains_no_executable_files(tmp_path: Path, source_root: Path) -> None:
@@ -894,7 +1299,7 @@ def test_library_contains_no_executable_files(tmp_path: Path, source_root: Path)
 def test_install_refuses_duplicate_legacy_and_current_roots(tmp_path: Path, source_root: Path) -> None:
     install(tmp_path, source_root, "one", "stable")
     legacy = tmp_path / installer.LEGACY_APP_REL
-    legacy.parent.mkdir(parents=True)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(app(tmp_path), legacy)
     with pytest.raises(RuntimeError, match="duplicate Control Freak installations"):
         install(tmp_path, source_root, "two", "stable")
@@ -986,7 +1391,7 @@ def test_v3_migration_recovers_after_launcher_replace(tmp_path: Path, source_roo
 
     monkeypatch.setattr(installer, "_atomic_write_at", real)
     install(tmp_path, source_root, "two", "stable")
-    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 6
+    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 7
     assert not (app(tmp_path) / installer.LIFECYCLE_JOURNAL).exists()
 
 
@@ -1003,7 +1408,7 @@ def test_v3_migration_replaces_service_and_launcher(tmp_path: Path, source_root:
     install(tmp_path, source_root, "two", "stable")
     assert not launcher.exists()
     assert service.read_bytes() == installer._service_bytes(source_root, tmp_path)
-    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 6
+    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 7
 
 
 def test_v5_rejects_modified_app_root_launcher(tmp_path: Path, source_root: Path) -> None:
@@ -1011,9 +1416,9 @@ def test_v5_rejects_modified_app_root_launcher(tmp_path: Path, source_root: Path
     launcher = app(tmp_path) / installer.LEGACY_LAUNCHER
     launcher.write_text("unknown")
 
-    with pytest.raises(RuntimeError, match="Unknown object in application root"):
+    with pytest.raises(RuntimeError, match="Modified stable file"):
         install(tmp_path, source_root, "two", "stable")
-    with pytest.raises(RuntimeError, match="Unknown object in application root"):
+    with pytest.raises(RuntimeError, match="Modified stable file"):
         uninstall(tmp_path)
 
     assert launcher.read_text() == "unknown"
@@ -1078,6 +1483,13 @@ def test_install_and_uninstall_manage_web_service(tmp_path: Path, source_root: P
 def test_fresh_install_service_start_failure_rolls_back_publication(
     tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    original_gamelist = b"<gameList><game><path>./other.pygame</path><name>Other</name></game></gameList>\n"
+    native_gamelist = pygame / "gamelist.xml"
+    native_gamelist.write_bytes(original_gamelist)
+    native_gamelist.chmod(0o644)
     calls = []
     service = {"enabled": False, "running": False}
     probes = []
@@ -1104,6 +1516,8 @@ def test_fresh_install_service_start_failure_rolls_back_publication(
     assert not app(tmp_path).exists()
     assert not (tmp_path / installer.SERVICES_REL / installer.SERVICE_NAME).exists()
     assert not (tmp_path / "system/control-freak/library/gamelist.xml").exists()
+    native = tmp_path / "roms/pygame/gamelist.xml"
+    assert native.read_bytes() == original_gamelist
     assert calls == [("enable", "start"), ("stop",), ("disable",)]
     assert service == {"enabled": False, "running": False}
     assert probes == ["enabled", "running"]
@@ -1330,8 +1744,8 @@ def test_install_migrates_version_two_manifest_to_owned_service(tmp_path: Path, 
     install(tmp_path / "root", new_source, "two", "stable")
 
     migrated = json.loads((app(tmp_path / "root") / "install-manifest.json").read_text())
-    assert migrated["version"] == 6
-    assert not (app(tmp_path / "root") / installer.LEGACY_LAUNCHER).exists()
+    assert migrated["version"] == 7
+    assert (app(tmp_path / "root") / installer.LEGACY_LAUNCHER).is_file()
     assert migrated["service"]["name"] == "control_freak"
     assert (tmp_path / "root/system/services/control_freak").is_file()
     assert (app(tmp_path / "root") / "logo-proposal-4.png").read_bytes() == (new_source / "assets/control-freak-logo-4.png").read_bytes()
@@ -1875,14 +2289,29 @@ def test_fallback_stop_rejects_wrong_process_uid(tmp_path: Path, monkeypatch: py
         os.fstat(pidfd)
 
 
-def test_registration_executes_only_service_boundary(tmp_path: Path, source_root: Path) -> None:
+def test_registration_uses_existing_pygame_system_and_service_boundary(tmp_path: Path, source_root: Path) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    native_gamelist = pygame / "gamelist.xml"
+    native_gamelist.write_text(
+        "<gameList><game><path>./rommbrowser/rommbrowser.pygame</path><name>RomM-o-Cera</name></game></gameList>"
+    )
+    native_gamelist.chmod(0o644)
+
     install(tmp_path, source_root, "one", "stable")
 
-    overlay = ET.parse(tmp_path / installer.OVERLAY_REL).getroot().find("system")
-    assert overlay is not None
-    assert overlay.findtext("command") == "/userdata/system/services/control_freak launch"
-    assert not (app(tmp_path) / "control-freak.pygame").exists()
-    assert not (tmp_path / "roms").exists()
+    assert ET.parse(tmp_path / installer.OVERLAY_REL).getroot().find("system") is None
+    games = ET.parse(pygame / "gamelist.xml").getroot().findall("game")
+    assert [(game.findtext("path"), game.findtext("name")) for game in games] == [
+        ("./rommbrowser/rommbrowser.pygame", "RomM-o-Cera"),
+        ("../../system/control-freak/app/control-freak.pygame", "Control Freak"),
+    ]
+    launcher = app(tmp_path) / "control-freak.pygame"
+    assert launcher.read_text().splitlines() == [
+        "import os",
+        f'os.execv("{tmp_path}/system/services/control_freak", ["control_freak", "launch"])',
+    ]
 
 
 def test_modified_service_is_not_replaced(tmp_path: Path, source_root: Path) -> None:

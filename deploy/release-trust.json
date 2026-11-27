@@ -3,7 +3,7 @@
     {
       "mode": 420,
       "path": "control_freak/__init__.py",
-      "sha256": "72388ce467758bf021eeccae13431f5bb8a969cf64504c798c4b2354a7a65935"
+      "sha256": "69a7456a7fb17e0ecb124d002d87e1165a2f8f4f98f5dba0fe21d85813b9a957"
     },
     {
       "mode": 420,
@@ -73,7 +73,7 @@
     {
       "mode": 420,
       "path": "control_freak/updates.py",
-      "sha256": "3419cdbd10439a54e9cb58d94ded1b959f1812dff4449d765baf9601f66c4151"
+      "sha256": "ddd1af8a8807cf8da17835b5dfe960f163a3ca1e1eab1dc064d17a79696a800c"
     },
     {
       "mode": 420,
@@ -83,7 +83,7 @@
   ],
   "service": {
     "mode": 493,
-    "sha256": "1c7c70a798695a4e425336716e71cba23652eb45c1b8ad155f075ee25e19a340"
+    "sha256": "d3a210026498df833ae05d71d1897acd43eb9d986a1aab32ee0250c7f4898803"
   },
   "source": [
     {
@@ -124,12 +124,17 @@
     {
       "mode": 493,
       "path": "deploy/control_freak",
-      "sha256": "15b33cb307e97fb14cfabe55a6639928d33176a1ec1c6fdfb3b1ec689f41cfae"
+      "sha256": "1c4d921698eb0a7beef2bf1bbb7768fda1fb25de90c26d64c677535f4735ffc5"
+    },
+    {
+      "mode": 420,
+      "path": "deploy/control-freak.pygame",
+      "sha256": "50e9c6808c3dfa342796ab57e88093263073ee092d311ff071736f8782fae354"
     },
     {
       "mode": 420,
       "path": "deploy/install_batocera.py",
-      "sha256": "d08694452542d3459ec64e2d6e7a09cc26ba00b6319a50ac57988ba66ab0e904"
+      "sha256": "7168e7fe7921557dcd6b7fc5421b64b4991a4dd6e4061584aed2e07b2b66227e"
     },
     {
       "mode": 420,

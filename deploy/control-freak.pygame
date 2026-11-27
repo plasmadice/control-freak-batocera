@@ -1,2 +1,2 @@
-#!/bin/sh
-exec /userdata/system/services/control_freak launch
+import os
+os.execv("/userdata/system/services/control_freak", ["control_freak", "launch"])

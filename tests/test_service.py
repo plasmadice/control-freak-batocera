@@ -72,6 +72,7 @@ def build_app(app: Path, release_id: str, web: str) -> None:
         "service": {"sha256": "0" * 64, "mode": 0o755},
         "source": [
             {"path": "deploy/install_batocera.py", "sha256": hashlib.sha256(b"").hexdigest(), "mode": 0o644},
+            {"path": "deploy/control-freak.pygame", "sha256": hashlib.sha256(b"").hexdigest(), "mode": 0o644},
             {"path": "assets/control-freak-image.png", "sha256": hashlib.sha256(b"").hexdigest(), "mode": 0o644},
         ],
     }, indent=2, sort_keys=True) + "\n").encode()
@@ -80,7 +81,7 @@ def build_app(app: Path, release_id: str, web: str) -> None:
     (release.parent / "trust.json").chmod(0o444)
     (release.parent / "trust.sig").chmod(0o444)
     (release.parent / "manifest.json").write_text(json.dumps({"version": 1, "release_id": release_id, "files": entries}))
-    modes = {"image.png": 0o644, **{f"logo-proposal-{number}.png": 0o644 for number in range(1, 7)}, "install_batocera.py": 0o644}
+    modes = {"control-freak.pygame": 0o644, "image.png": 0o644, **{f"logo-proposal-{number}.png": 0o644 for number in range(1, 7)}, "install_batocera.py": 0o644}
     static = {}
     for name, mode in modes.items():
         target = app / name
@@ -122,7 +123,12 @@ def build_app(app: Path, release_id: str, web: str) -> None:
         target.write_bytes(registration_bytes[name])
         target.chmod(0o644)
         registration[name] = {"sha256": hashlib.sha256(registration_bytes[name]).hexdigest(), "mode": 0o644}
-    (app / "install-manifest.json").write_text(json.dumps({"version": 6, "static": static, "service": {"name": "control_freak", "sha256": "0" * 64, "mode": 0o755}, "registration": registration, "releases": [release_id]}))
+    native = userdata / "roms/pygame/gamelist.xml"
+    native.parent.mkdir(parents=True)
+    native.parent.chmod(0o755)
+    native.write_text("""<gameList><game><path>../../system/control-freak/app/control-freak.pygame</path><name>Control Freak</name><desc>Controller-first settings and management for Batocera.</desc><genre>Utility</genre><image>../../system/control-freak/app/image.png</image><developer>Haku</developer><publisher>Haku</publisher><players>1</players></game></gameList>\n""")
+    native.chmod(0o644)
+    (app / "install-manifest.json").write_text(json.dumps({"version": 7, "static": static, "service": {"name": "control_freak", "sha256": "0" * 64, "mode": 0o755}, "registration": registration, "releases": [release_id]}))
 
 
 def bind_wrapper(app: Path, script: Path) -> None:
@@ -187,6 +193,56 @@ def test_service_refuses_modified_release_before_start(tmp_path: Path) -> None:
     (app / "releases/one/control_freak/web.py").write_text("def main(): raise SystemExit\n")
     assert subprocess.run([script, "start"], check=False, capture_output=True).returncode != 0
     assert not (state / "web.pid").exists()
+
+
+def test_service_binds_launcher_to_signed_control_plane(tmp_path: Path) -> None:
+    app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
+    launcher = app / "control-freak.pygame"
+    launcher.write_bytes(b"tampered")
+    manifest_path = app / "install-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["static"]["control-freak.pygame"] = hashlib.sha256(b"tampered").hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "Release trust statement does not match installed payload" in result.stderr
+
+
+def test_service_rejects_ambiguous_native_pygame_entry(tmp_path: Path) -> None:
+    app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
+    gamelist = app.parents[2] / "roms/pygame/gamelist.xml"
+    document = ET.parse(gamelist)
+    game = document.getroot().find("game")
+    assert game is not None
+    ET.SubElement(game, "path").text = "./other.pygame"
+    ET.SubElement(game, "unknown").append(ET.Element("nested"))
+    document.write(gamelist, encoding="utf-8", xml_declaration=True)
+
+    result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "Modified Control Freak registration" in result.stderr
+
+
+def test_service_rejects_writable_native_pygame_directory(tmp_path: Path) -> None:
+    app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
+    (app.parents[2] / "roms/pygame").chmod(0o777)
+
+    result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "Modified Control Freak registration" in result.stderr
+
+
+def test_service_rejects_symlinked_native_pygame_directory(tmp_path: Path) -> None:
+    app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
+    pygame = app.parents[2] / "roms/pygame"
+    moved = pygame.with_name("pygame-real")
+    pygame.rename(moved)
+    pygame.symlink_to(moved, target_is_directory=True)
+
+    result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "Modified Control Freak registration" in result.stderr
 
 
 def test_service_accepts_emulationstation_play_metadata(tmp_path: Path) -> None:
