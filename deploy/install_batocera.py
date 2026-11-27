@@ -231,6 +231,39 @@ def _open_shared_pygame_dir(path: Path) -> int:
     return fd
 
 
+def _open_native_pygame_dir(path: Path) -> int:
+    fd = _open_shared_pygame_dir(path)
+    info = os.fstat(fd)
+    if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        os.close(fd)
+        raise RuntimeError("Refusing unsafe native pygame directory")
+    return fd
+
+
+def _open_native_launcher_dir(root: Path, *, create: bool = False) -> int:
+    pygame_fd = _open_native_pygame_dir(root / LEGACY_APP_PARENT_REL)
+    try:
+        try:
+            launcher_fd = os.open("control-freak-launcher", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pygame_fd)
+        except FileNotFoundError:
+            if not create:
+                raise
+            os.mkdir("control-freak-launcher", 0o755, dir_fd=pygame_fd)
+            os.fsync(pygame_fd)
+            launcher_fd = os.open("control-freak-launcher", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pygame_fd)
+        info = os.fstat(launcher_fd)
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            os.close(launcher_fd)
+            raise RuntimeError("Refusing unsafe native launcher directory")
+        return launcher_fd
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise RuntimeError("Refusing unsafe native launcher directory") from exc
+    finally:
+        os.close(pygame_fd)
+
+
 def _lifecycle_lock(directory_fd: int) -> int:
     global _ACTIVE_LIFECYCLE_LOCK
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
@@ -365,20 +398,55 @@ def _gamelist_exchange_supported(root: Path) -> bool:
                 pass
 
 
-def _registration_strategy(root: Path, app: Path) -> str:
+def _native_registration_supported(root: Path, *, probe_exchange: bool = True) -> bool:
+    pygame = root / LEGACY_APP_PARENT_REL
+    if not pygame.exists() and not pygame.is_symlink():
+        return _gamelist_exchange_supported(root) if probe_exchange else False
+    pygame_fd = _open_shared_pygame_dir(pygame)
+    try:
+        info = os.fstat(pygame_fd)
+        if info.st_uid != os.geteuid() or info.st_mode & 0o020:
+            return False
+        try:
+            launcher_info = os.stat("control-freak-launcher", dir_fd=pygame_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISDIR(launcher_info.st_mode) or launcher_info.st_uid != os.geteuid() or launcher_info.st_mode & 0o022:
+                raise RuntimeError("Refusing unsafe native launcher directory")
+            launcher_fd = _open_native_launcher_dir(root)
+            try:
+                try:
+                    file_info = os.stat("control-freak.pygame", dir_fd=launcher_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    if not stat.S_ISREG(file_info.st_mode) or file_info.st_uid != os.geteuid() or file_info.st_mode & 0o777 != 0o644:
+                        raise RuntimeError("Refusing unsafe native launcher file")
+            finally:
+                os.close(launcher_fd)
+    finally:
+        os.close(pygame_fd)
+    return _gamelist_exchange_supported(root) if probe_exchange else True
+
+
+def _registration_strategy(root: Path, app: Path, *, probe_exchange: bool = True) -> str:
     if (app / ROOT_MANIFEST).is_file() and not (app / ROOT_MANIFEST).is_symlink():
         manifest = _load_json_file(app / ROOT_MANIFEST, "install manifest")
         if not _valid_install_manifest(manifest):
             raise RuntimeError("Invalid install manifest")
         if manifest["version"] in {8, 9}:
-            return manifest["registration_strategy"]
+            strategy = manifest["registration_strategy"]
+            if strategy == "native" and not _native_registration_supported(root, probe_exchange=False):
+                raise RuntimeError("Native registration requires an owned non-writable pygame directory")
+            return strategy
         if manifest["version"] == 7:
-            if not _gamelist_exchange_supported(root):
+            if not _native_registration_supported(root, probe_exchange=probe_exchange):
                 raise RuntimeError("Native registration requires atomic path exchange")
             return "native"
         if manifest["version"] == 6:
-            return "native" if _gamelist_exchange_supported(root) else "local"
-    return "native" if _gamelist_exchange_supported(root) else "local"
+            return "native" if _native_registration_supported(root, probe_exchange=probe_exchange) else "local"
+    return "native" if _native_registration_supported(root, probe_exchange=probe_exchange) else "local"
 
 
 def _fsync_tree(root: Path) -> None:
@@ -692,6 +760,19 @@ def _installed_registration_bytes(app: Path, strategy: str) -> dict[str, bytes]:
 def _preflight_registration(root: Path, data: dict[str, bytes]) -> list[str]:
     missing = []
     for name, path in _registration_paths(root, "native" if "launcher" in data else "local").items():
+        if name == "launcher":
+            try:
+                directory_fd = _open_native_launcher_dir(root)
+                try:
+                    current, info = _read_at(directory_fd, path.name)
+                finally:
+                    os.close(directory_fd)
+            except FileNotFoundError:
+                missing.append(name)
+                continue
+            if current != data[name] or info.st_uid != os.geteuid() or info.st_mode & 0o777 != REGISTRATION_MODES[name]:
+                raise RuntimeError(f"Refusing unknown registration file: {name}")
+            continue
         try:
             info = path.lstat()
             if path.is_symlink():
@@ -729,6 +810,29 @@ def _gamelist_is_owned(path: Path) -> bool:
 
 def _validate_registration(root: Path, registration: dict, expected: dict[str, bytes] | None = None, *, allow_absent: bool = False) -> None:
     for name, path in _registration_paths(root, "native" if "launcher" in registration else "local").items():
+        if name == "launcher":
+            try:
+                directory_fd = _open_native_launcher_dir(root)
+                try:
+                    data, info = _read_at(directory_fd, path.name)
+                finally:
+                    os.close(directory_fd)
+                matches = (
+                    info.st_uid == os.geteuid()
+                    and info.st_mode & 0o777 == registration[name]["mode"]
+                    and hashlib.sha256(data).hexdigest() == registration[name]["sha256"]
+                )
+            except FileNotFoundError:
+                if allow_absent:
+                    continue
+                matches = False
+            except OSError:
+                matches = False
+            if not matches:
+                raise RuntimeError(f"Modified registration file: {name}")
+            if expected is not None and registration[name]["sha256"] != hashlib.sha256(expected[name]).hexdigest():
+                raise RuntimeError(f"Lifecycle protocol mismatch: {name}")
+            continue
         try:
             info = path.lstat()
             matches = (
@@ -772,12 +876,14 @@ def _ensure_registration(root: Path, source: Path, strategy: str) -> dict:
     _prepare_owned_directory(root, LIBRARY_REL)
     _prepare_owned_directory(root, LIBRARY_REL / "images")
     if strategy == "native":
-        _mkdirs_no_symlinks(root, NATIVE_LAUNCHER_REL.parent)
+        _mkdirs_no_symlinks(root, LEGACY_APP_PARENT_REL)
+        launcher_fd = _open_native_launcher_dir(root, create=True)
+        os.close(launcher_fd)
     created = []
     try:
         for name in missing:
             path = paths[name]
-            directory_fd = _open_dir(path.parent)
+            directory_fd = _open_native_launcher_dir(root) if name == "launcher" else _open_dir(path.parent)
             try:
                 _atomic_create_at(directory_fd, path.name, data[name], REGISTRATION_MODES[name])
                 created.append(path)
@@ -785,7 +891,7 @@ def _ensure_registration(root: Path, source: Path, strategy: str) -> dict:
                 os.close(directory_fd)
     except BaseException:
         for path in reversed(created):
-            directory_fd = _open_dir(path.parent)
+            directory_fd = _open_native_launcher_dir(root) if path == paths.get("launcher") else _open_dir(path.parent)
             try:
                 os.unlink(path.name, dir_fd=directory_fd)
                 os.fsync(directory_fd)
@@ -799,8 +905,16 @@ def _update_registration(root: Path, before: dict, after: dict, data: dict[str, 
     for name, path in _registration_paths(root, "native" if "launcher" in after else "local").items():
         if after[name]["sha256"] != hashlib.sha256(data[name]).hexdigest():
             raise RuntimeError(f"Lifecycle protocol mismatch: {name}")
-        info = path.lstat()
-        digest = checksum(path)
+        if name == "launcher":
+            directory_fd = _open_native_launcher_dir(root)
+            try:
+                current, info = _read_at(directory_fd, path.name)
+            finally:
+                os.close(directory_fd)
+            digest = hashlib.sha256(current).hexdigest()
+        else:
+            info = path.lstat()
+            digest = checksum(path)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o777 != after[name]["mode"]:
             raise RuntimeError(f"Modified registration file: {name}")
         if digest == after[name]["sha256"]:
@@ -809,7 +923,7 @@ def _update_registration(root: Path, before: dict, after: dict, data: dict[str, 
             continue
         if digest not in {before[name]["sha256"], after[name]["sha256"]}:
             raise RuntimeError(f"Modified registration file: {name}")
-        directory_fd = _open_dir(path.parent)
+        directory_fd = _open_native_launcher_dir(root) if name == "launcher" else _open_dir(path.parent)
         try:
             _atomic_write_at(directory_fd, path.name, data[name], after[name]["mode"])
         finally:
@@ -821,7 +935,7 @@ def _remove_registration(root: Path, registration: dict, *, allow_absent: bool =
     for path in _registration_paths(root, "native" if "launcher" in registration else "local").values():
         if not path.exists():
             continue
-        directory_fd = _open_dir(path.parent)
+        directory_fd = _open_native_launcher_dir(root) if path == root / NATIVE_LAUNCHER_REL else _open_dir(path.parent)
         try:
             os.unlink(path.name, dir_fd=directory_fd)
             os.fsync(directory_fd)
@@ -2041,6 +2155,7 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
             _load_install(app, allow_missing_service=True)
         return operations
 
+    _registration_strategy(root, app, probe_exchange=False)
     _prepare_state_directory(root)
     services_fd = _prepare_owned_directory(root, SERVICES_REL)
     pygame_fd = _open_dir(root / APP_PARENT_REL)
@@ -2337,6 +2452,7 @@ def rollback_info(userdata: Path) -> str | None:
     app = root / APP_REL
     if (app / ACTIVATION_JOURNAL).exists() or (app / LIFECYCLE_JOURNAL).exists():
         raise RuntimeError("Interrupted activation requires recovery")
+    _registration_strategy(root, app)
     manifest, current = _load_install(app)
     predecessors = [release for release in manifest["releases"] if release != current["release_id"]]
     return predecessors[-1] if predecessors else None
@@ -2348,6 +2464,7 @@ def rollback(userdata: Path) -> list[str]:
     pygame_fd = _open_dir(root / APP_PARENT_REL)
     lock_fd = _lifecycle_lock(pygame_fd)
     try:
+        _registration_strategy(root, app)
         _recover_activation(root, app)
         manifest, current = _load_install(app)
         predecessors = [release for release in manifest["releases"] if release != current["release_id"]]
@@ -2446,6 +2563,8 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
         local_registration = isinstance(preflight_manifest, dict) and _valid_install_manifest(preflight_manifest) and preflight_manifest.get("registration_strategy") == "local"
         native_pygame = root / LEGACY_APP_PARENT_REL
         if not local_registration and (native_pygame.exists() or native_pygame.is_symlink()):
+            if not _native_registration_supported(root, probe_exchange=False):
+                raise RuntimeError("Native registration requires an owned non-writable pygame directory")
             _pygame_gamelist_snapshot(root)
         planned_quarantine = None if uninstall_intent is None else uninstall_intent["quarantine"]
         if app.exists() or app.is_symlink():
