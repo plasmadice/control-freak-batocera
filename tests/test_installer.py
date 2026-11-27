@@ -612,7 +612,7 @@ def test_install_registers_versioned_custom_system_application(tmp_path: Path, s
     root = app(tmp_path)
     assert (root / "control-freak.pygame").is_file()
     manifest = json.loads((root / installer.ROOT_MANIFEST).read_text())
-    assert manifest["version"] == 8
+    assert manifest["version"] == 9
     assert manifest["registration_strategy"] == "native"
     assert (root / "image.png").is_file()
     assert (root / "releases/0.1.0-test/control_freak/app.py").is_file()
@@ -691,6 +691,7 @@ def test_exchange_unsupported_uses_local_registration_without_touching_native(
     assert manifest["registration_strategy"] == "local"
     assert "<name>controlfreak</name>" in (tmp_path / installer.OVERLAY_REL).read_text()
     assert gamelist.read_bytes() == original
+    assert not (tmp_path / installer.NATIVE_LAUNCHER_REL).exists()
     service = tmp_path / installer.SERVICES_REL / installer.SERVICE_NAME
     for name, value in {"F_ADD_SEALS": 1033, "F_SEAL_SEAL": 1, "F_SEAL_SHRINK": 2, "F_SEAL_GROW": 4, "F_SEAL_WRITE": 8}.items():
         setattr(installer.fcntl, name, getattr(installer.fcntl, name, value))
@@ -714,19 +715,43 @@ def test_upgrade_from_version_six_registers_native_pygame(tmp_path: Path, source
     manifest = json.loads(manifest_path.read_text())
     manifest["version"] = 6
     manifest.pop("registration_strategy")
+    manifest["registration"].pop("launcher")
     manifest["static"].pop("control-freak.pygame")
     (application / "control-freak.pygame").unlink()
+    shutil.rmtree(tmp_path / installer.NATIVE_LAUNCHER_REL.parent)
     installer._sync_pygame_gamelist(tmp_path, remove=True)
     manifest_path.write_bytes(installer._json_bytes(manifest))
 
     install(tmp_path, source_root, "two", "stable")
 
     upgraded = json.loads(manifest_path.read_text())
-    assert upgraded["version"] == 8
+    assert upgraded["version"] == 9
     assert upgraded["registration_strategy"] == "native"
     assert (application / "control-freak.pygame").is_file()
     games = ET.parse(tmp_path / "roms/pygame/gamelist.xml").getroot().findall("game")
     assert [game.findtext("path") for game in games].count(installer.PYGAME_GAME_PATH) == 1
+
+
+@pytest.mark.parametrize("version", [7, 8])
+def test_upgrade_from_native_predecessor_registers_scanner_launcher(
+    tmp_path: Path, source_root: Path, version: int,
+) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    manifest_path = app(tmp_path) / installer.ROOT_MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    manifest["version"] = version
+    manifest["registration"].pop("launcher")
+    if version == 7:
+        manifest.pop("registration_strategy")
+    shutil.rmtree(tmp_path / installer.NATIVE_LAUNCHER_REL.parent)
+    manifest_path.write_bytes(installer._json_bytes(manifest))
+
+    install(tmp_path, source_root, "two", "stable")
+
+    upgraded = json.loads(manifest_path.read_text())
+    assert upgraded["version"] == 9
+    assert upgraded["registration_strategy"] == "native"
+    assert (tmp_path / installer.NATIVE_LAUNCHER_REL).is_file()
 
 
 def test_version_six_with_retained_release_migrates_to_local_without_cleaning_recovery_names(
@@ -740,8 +765,10 @@ def test_version_six_with_retained_release_migrates_to_local_without_cleaning_re
     installer._sync_pygame_gamelist(tmp_path, remove=True)
     manifest["version"] = 6
     manifest.pop("registration_strategy")
+    manifest["registration"].pop("launcher")
     manifest["static"].pop("control-freak.pygame")
     (application / "control-freak.pygame").unlink()
+    shutil.rmtree(tmp_path / installer.NATIVE_LAUNCHER_REL.parent)
     (application / installer.CURRENT).write_bytes(installer._json_bytes({"version": 1, "release_id": "one", "channel": "stable"}))
     manifest_path.write_bytes(installer._json_bytes(manifest))
     pygame = tmp_path / installer.LEGACY_APP_PARENT_REL
@@ -759,7 +786,7 @@ def test_version_six_with_retained_release_migrates_to_local_without_cleaning_re
     assert [path.read_bytes() for path in recoveries] == [b"recovery-0", b"recovery-1", b"recovery-2"]
 
 
-def test_install_uses_native_pygame_system_without_rom_executables(tmp_path: Path, source_root: Path) -> None:
+def test_install_uses_scanner_visible_native_pygame_launcher(tmp_path: Path, source_root: Path) -> None:
     install(tmp_path, source_root, "one", "stable")
 
     application = tmp_path / "system/control-freak/app"
@@ -778,12 +805,18 @@ def test_install_uses_native_pygame_system_without_rom_executables(tmp_path: Pat
     assert native_game is not None
     assert native_game.findtext("path") == installer.PYGAME_GAME_PATH
     assert native_game.findtext("image") == "../../system/control-freak/app/image.png"
+    native_launcher = tmp_path / installer.NATIVE_LAUNCHER_REL
+    assert native_launcher.is_file()
+    assert native_launcher.suffix == ".pygame"
+    assert native_launcher.read_bytes() == (application / "control-freak.pygame").read_bytes()
+    assert "system/services/control_freak" in native_launcher.read_text()
     manifest = json.loads((application / installer.ROOT_MANIFEST).read_text())
     assert manifest["registration"] == {
         "overlay": {"sha256": installer.checksum(overlay), "mode": 0o644},
         "marker": {"sha256": installer.checksum(library / "Control Freak.controlfreak"), "mode": 0o644},
         "gamelist": {"sha256": installer.checksum(library / "gamelist.xml"), "mode": 0o644},
         "image": {"sha256": installer.checksum(library / "images/control-freak.png"), "mode": 0o644},
+        "launcher": {"sha256": installer.checksum(native_launcher), "mode": 0o644},
     }
 
 
@@ -828,7 +861,7 @@ def test_update_recovers_crash_after_registration_migration(tmp_path: Path, sour
     with pytest.raises(RuntimeError, match="unsafe pygame directory"):
         install(tmp_path, source_root, "two", "stable")
     assert (application / installer.LIFECYCLE_JOURNAL).is_file()
-    pygame.chmod(0o775)
+    pygame.chmod(0o755)
     install(tmp_path, source_root, "two", "stable")
     assert overlay.read_text() == installer.SYSTEMS_OVERLAY
     assert not (application / installer.LIFECYCLE_JOURNAL).exists()
@@ -837,13 +870,13 @@ def test_update_recovers_crash_after_registration_migration(tmp_path: Path, sour
 def test_update_migrates_v3_from_legacy_rom_root(tmp_path: Path, source_root: Path) -> None:
     install(tmp_path, source_root, "one", "stable")
     launcher = make_legacy_v3(tmp_path)
-    (tmp_path / installer.LEGACY_APP_PARENT_REL).chmod(0o775)
+    (tmp_path / installer.LEGACY_APP_PARENT_REL).chmod(0o755)
 
     install(tmp_path, source_root, "two", "stable")
 
     assert not launcher.exists()
     manifest = json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())
-    assert manifest["version"] == 8
+    assert manifest["version"] == 9
     assert installer.LEGACY_LAUNCHER in manifest["static"]
     assert current(tmp_path)["release_id"] == "two"
     assert manifest["releases"] == ["one", "two"]
@@ -966,7 +999,7 @@ def test_update_accepts_emulationstation_gamelist_play_metadata(tmp_path: Path, 
 def test_shared_gamelist_refuses_world_writable_file_before_install(tmp_path: Path, source_root: Path) -> None:
     pygame = tmp_path / "roms/pygame"
     pygame.mkdir(parents=True)
-    pygame.chmod(0o775)
+    pygame.chmod(0o755)
     gamelist = pygame / "gamelist.xml"
     gamelist.write_bytes(b"<gameList><game><path>./other.pygame</path><name>Other</name></game></gameList>\n")
     gamelist.chmod(0o666)
@@ -1019,6 +1052,9 @@ def test_shared_gamelist_allows_batocera_roms_parent_mode(tmp_path: Path, source
     install(tmp_path, source_root, "one", "stable")
 
     assert (pygame / "gamelist.xml").is_file()
+    manifest = json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())
+    assert manifest["registration_strategy"] == "native"
+    assert (tmp_path / installer.NATIVE_LAUNCHER_REL).is_file()
 
 
 def test_platform_owned_group_writable_gamelist_survives_full_lifecycle(
@@ -1032,12 +1068,103 @@ def test_platform_owned_group_writable_gamelist_survives_full_lifecycle(
     gamelist.chmod(0o664)
 
     install(tmp_path, source_root, "one", "stable")
+    manifest = json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())
+    assert manifest["registration_strategy"] == "local"
+    assert not (tmp_path / installer.NATIVE_LAUNCHER_REL).exists()
     install(tmp_path, source_root, "two", "stable")
     uninstall(tmp_path)
 
     assert pygame.stat().st_mode & 0o777 == 0o775
     assert gamelist.stat().st_mode & 0o777 == 0o664
     assert [game.findtext("name") for game in ET.parse(gamelist).getroot().findall("game")] == ["Other"]
+
+
+def test_native_registration_rejects_unsafe_launcher_directory_before_snapshot(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    launcher = pygame / "control-freak-launcher"
+    launcher.mkdir(parents=True)
+    pygame.chmod(0o755)
+    launcher.chmod(0o777)
+    monkeypatch.setattr(installer, "_snapshot_source", lambda *_args: pytest.fail("source snapshot started"))
+
+    with pytest.raises(RuntimeError, match="unsafe native launcher directory"):
+        install(tmp_path, source_root, "one", "stable")
+
+    assert launcher.stat().st_mode & 0o777 == 0o777
+    assert not app(tmp_path).exists()
+
+
+def test_native_registration_rejects_unsafe_launcher_file_before_snapshot(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    launcher = pygame / "control-freak-launcher"
+    launcher.mkdir(parents=True)
+    pygame.chmod(0o755)
+    launcher.chmod(0o755)
+    launcher_file = launcher / "control-freak.pygame"
+    launcher_file.write_bytes(b"unknown")
+    launcher_file.chmod(0o666)
+    monkeypatch.setattr(installer, "_snapshot_source", lambda *_args: pytest.fail("source snapshot started"))
+
+    with pytest.raises(RuntimeError, match="unsafe native launcher file"):
+        install(tmp_path, source_root, "one", "stable")
+
+    assert launcher_file.read_bytes() == b"unknown"
+    assert not app(tmp_path).exists()
+
+
+def test_native_registration_rechecks_swapped_pygame_directory(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pygame = tmp_path / "roms/pygame"
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o755)
+    real_snapshot = installer._snapshot_source
+
+    def swap(source: Path, parent: Path) -> Path:
+        snapshot = real_snapshot(source, parent)
+        pygame.rename(pygame.with_name("pygame-safe"))
+        pygame.mkdir()
+        pygame.chmod(0o775)
+        return snapshot
+
+    monkeypatch.setattr(installer, "_snapshot_source", swap)
+    with pytest.raises(RuntimeError, match="unsafe native pygame directory"):
+        install(tmp_path, source_root, "one", "stable")
+
+    assert not (tmp_path / installer.NATIVE_LAUNCHER_REL).exists()
+    assert not app(tmp_path).exists()
+
+
+def test_native_update_and_uninstall_reject_group_writable_parent_without_launcher_validation(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    (tmp_path / installer.LEGACY_APP_PARENT_REL).chmod(0o775)
+    real_validate = installer._validate_registration
+
+    def reject_launcher_validation(
+        root: Path, registration: dict, expected: dict[str, bytes] | None = None, *, allow_absent: bool = False,
+    ) -> None:
+        if "launcher" in registration:
+            pytest.fail("native launcher validated")
+        real_validate(root, registration, expected, allow_absent=allow_absent)
+
+    monkeypatch.setattr(installer, "_validate_registration", reject_launcher_validation)
+    with pytest.raises(RuntimeError, match="owned non-writable pygame directory"):
+        install(tmp_path, source_root, "two", "stable")
+    with pytest.raises(RuntimeError, match="owned non-writable pygame directory"):
+        rollback_info(tmp_path)
+    with pytest.raises(RuntimeError, match="owned non-writable pygame directory"):
+        rollback(tmp_path)
+    with pytest.raises(RuntimeError, match="owned non-writable pygame directory"):
+        uninstall(tmp_path)
+
+    assert current(tmp_path)["release_id"] == "one"
+    assert app(tmp_path).is_dir()
 
 
 def test_gamelist_state_accepts_non_euid_platform_owner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1075,7 +1202,7 @@ def test_native_gamelist_semantics_fail_before_source_snapshot(
 ) -> None:
     pygame = tmp_path / "roms/pygame"
     pygame.mkdir(parents=True)
-    pygame.chmod(0o775)
+    pygame.chmod(0o755)
     gamelist = pygame / "gamelist.xml"
     gamelist.write_text(f"<gameList>{controlled}</gameList>\n")
     gamelist.chmod(0o664)
@@ -1606,7 +1733,7 @@ def test_v3_migration_recovers_after_launcher_replace(tmp_path: Path, source_roo
 
     monkeypatch.setattr(installer, "_atomic_write_at", real)
     install(tmp_path, source_root, "two", "stable")
-    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 8
+    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 9
     assert not (app(tmp_path) / installer.LIFECYCLE_JOURNAL).exists()
 
 
@@ -1623,7 +1750,7 @@ def test_v3_migration_replaces_service_and_launcher(tmp_path: Path, source_root:
     install(tmp_path, source_root, "two", "stable")
     assert not launcher.exists()
     assert service.read_bytes() == installer._service_bytes(source_root, tmp_path)
-    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 8
+    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 9
 
 
 def test_v5_rejects_modified_app_root_launcher(tmp_path: Path, source_root: Path) -> None:
@@ -1959,7 +2086,7 @@ def test_install_migrates_version_two_manifest_to_owned_service(tmp_path: Path, 
     install(tmp_path / "root", new_source, "two", "stable")
 
     migrated = json.loads((app(tmp_path / "root") / "install-manifest.json").read_text())
-    assert migrated["version"] == 8
+    assert migrated["version"] == 9
     assert (app(tmp_path / "root") / installer.LEGACY_LAUNCHER).is_file()
     assert migrated["service"]["name"] == "control_freak"
     assert (tmp_path / "root/system/services/control_freak").is_file()
@@ -2520,7 +2647,7 @@ def test_registration_uses_existing_pygame_system_and_service_boundary(tmp_path:
     games = ET.parse(pygame / "gamelist.xml").getroot().findall("game")
     assert [(game.findtext("path"), game.findtext("name")) for game in games] == [
         ("./rommbrowser/rommbrowser.pygame", "RomM-o-Cera"),
-        ("../../system/control-freak/app/control-freak.pygame", "Control Freak"),
+        (installer.PYGAME_GAME_PATH, "Control Freak"),
     ]
     launcher = app(tmp_path) / "control-freak.pygame"
     assert launcher.read_text().splitlines() == [

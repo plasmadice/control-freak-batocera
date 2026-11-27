@@ -96,6 +96,7 @@ def build_app(app: Path, release_id: str, web: str) -> None:
         "marker": library / "Control Freak.controlfreak",
         "gamelist": library / "gamelist.xml",
         "image": library / "images/control-freak.png",
+        "launcher": userdata / "roms/pygame/control-freak-launcher/control-freak.pygame",
     }
     gamelist = ET.Element("gameList")
     game = ET.SubElement(gamelist, "game")
@@ -116,19 +117,22 @@ def build_app(app: Path, release_id: str, web: str) -> None:
         "marker": b"",
         "gamelist": b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(gamelist, encoding="utf-8") + b"\n",
         "image": b"",
+        "launcher": b"",
     }
     registration = {}
     for name, target in registration_paths.items():
         target.parent.mkdir(parents=True, exist_ok=True)
+        if name == "launcher":
+            target.parent.chmod(0o755)
         target.write_bytes(registration_bytes[name])
         target.chmod(0o644)
         registration[name] = {"sha256": hashlib.sha256(registration_bytes[name]).hexdigest(), "mode": 0o644}
     native = userdata / "roms/pygame/gamelist.xml"
-    native.parent.mkdir(parents=True)
+    native.parent.mkdir(parents=True, exist_ok=True)
     native.parent.chmod(0o755)
-    native.write_text("""<gameList><game><path>../../system/control-freak/app/control-freak.pygame</path><name>Control Freak</name><desc>Controller-first settings and management for Batocera.</desc><genre>Utility</genre><image>../../system/control-freak/app/image.png</image><developer>Haku</developer><publisher>Haku</publisher><players>1</players></game></gameList>\n""")
+    native.write_text("""<gameList><game><path>./control-freak-launcher/control-freak.pygame</path><name>Control Freak</name><desc>Controller-first settings and management for Batocera.</desc><genre>Utility</genre><image>../../system/control-freak/app/image.png</image><developer>Haku</developer><publisher>Haku</publisher><players>1</players></game></gameList>\n""")
     native.chmod(0o644)
-    (app / "install-manifest.json").write_text(json.dumps({"version": 7, "static": static, "service": {"name": "control_freak", "sha256": "0" * 64, "mode": 0o755}, "registration": registration, "releases": [release_id]}))
+    (app / "install-manifest.json").write_text(json.dumps({"version": 9, "static": static, "service": {"name": "control_freak", "sha256": "0" * 64, "mode": 0o755}, "registration": registration, "registration_strategy": "native", "releases": [release_id]}))
 
 
 def bind_wrapper(app: Path, script: Path) -> None:
@@ -224,7 +228,7 @@ def test_service_rejects_ambiguous_native_pygame_entry(tmp_path: Path) -> None:
     assert "Modified Control Freak registration" in result.stderr
 
 
-def test_service_accepts_platform_owned_group_writable_native_gamelist(tmp_path: Path) -> None:
+def test_service_rejects_group_writable_native_pygame_parent(tmp_path: Path) -> None:
     app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
     pygame = app.parents[2] / "roms/pygame"
     gamelist = pygame / "gamelist.xml"
@@ -232,12 +236,22 @@ def test_service_accepts_platform_owned_group_writable_native_gamelist(tmp_path:
     gamelist.chmod(0o664)
 
     result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "Modified Control Freak registration" in result.stderr
 
     gamelist.chmod(0o666)
     result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
     assert result.returncode != 0
     assert "Modified Control Freak registration" in result.stderr
+
+
+def test_service_accepts_group_writable_platform_gamelist(tmp_path: Path) -> None:
+    app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
+    gamelist = app.parents[2] / "roms/pygame/gamelist.xml"
+    gamelist.chmod(0o664)
+
+    result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_service_rejects_world_writable_native_pygame_directory(tmp_path: Path) -> None:
