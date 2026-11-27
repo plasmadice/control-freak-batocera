@@ -209,6 +209,14 @@ def _open_owned_dir(path: Path) -> int:
     return fd
 
 
+def _open_shared_pygame_dir(path: Path) -> int:
+    fd = _open_dir(path)
+    if os.fstat(fd).st_mode & 0o002:
+        os.close(fd)
+        raise RuntimeError("Refusing unsafe pygame directory")
+    return fd
+
+
 def _lifecycle_lock(directory_fd: int) -> int:
     global _ACTIVE_LIFECYCLE_LOCK
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
@@ -227,7 +235,7 @@ def _lifecycle_lock(directory_fd: int) -> int:
 
 
 def _read_at(directory_fd: int, name: str) -> tuple[bytes, os.stat_result]:
-    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -983,7 +991,10 @@ def gamelist_bytes(data: bytes | None, release_id: str, remove: bool = False, *,
             "publisher": "Haku",
             "players": "1",
         }
-        for game in matches:
+        for game in (
+            item for item in matches
+            if any(child.tag == "path" and child.text == PYGAME_GAME_PATH for child in item)
+        ):
             fields: dict[str, str | None] = {}
             malformed = bool(game.attrib or (game.text or "").strip() or (game.tail or "").strip())
             for child in game:
@@ -1096,16 +1107,18 @@ def _replace_gamelist(pygame_fd: int, original: os.stat_result | None, original_
 
 def _pygame_gamelist_snapshot(root: Path) -> tuple[bytes | None, int]:
     _mkdirs_no_symlinks(root, LEGACY_APP_PARENT_REL)
-    pygame_fd = _open_dir(root / LEGACY_APP_PARENT_REL)
+    pygame_fd = _open_shared_pygame_dir(root / LEGACY_APP_PARENT_REL)
     try:
         data, mode, _ = _gamelist_state(pygame_fd)
+        if data is not None:
+            gamelist_bytes(data, "preflight")
         return data, mode
     finally:
         os.close(pygame_fd)
 
 
 def _restore_pygame_gamelist(root: Path, expected: tuple[bytes | None, int], previous: tuple[bytes | None, int]) -> None:
-    pygame_fd = _open_dir(root / LEGACY_APP_PARENT_REL)
+    pygame_fd = _open_shared_pygame_dir(root / LEGACY_APP_PARENT_REL)
     try:
         current, mode, info = _gamelist_state(pygame_fd)
         if current != expected[0]:
@@ -1125,7 +1138,7 @@ def _sync_pygame_gamelist(root: Path, remove: bool = False) -> bool:
     if remove and not pygame.exists():
         return False
     _mkdirs_no_symlinks(root, LEGACY_APP_PARENT_REL)
-    pygame_fd = _open_dir(pygame)
+    pygame_fd = _open_shared_pygame_dir(pygame)
     try:
         data, mode, info = _gamelist_state(pygame_fd)
         if remove and data is None:
@@ -1889,7 +1902,7 @@ def _migrate_legacy_install(root: Path) -> None:
         _load_install(legacy, allow_missing_service=True)
         _prepare_state_directory(root)
         parent_fd = _open_dir(root / APP_PARENT_REL)
-        legacy_fd = _open_owned_dir(root / LEGACY_APP_PARENT_REL)
+        legacy_fd = _open_shared_pygame_dir(root / LEGACY_APP_PARENT_REL)
         try:
             os.rename("control-freak", "app", src_dir_fd=legacy_fd, dst_dir_fd=parent_fd)
             os.fsync(legacy_fd)
@@ -1901,7 +1914,7 @@ def _migrate_legacy_install(root: Path) -> None:
         return
     gamelist = root / LEGACY_APP_PARENT_REL / "gamelist.xml"
     if gamelist.exists() and not gamelist.is_symlink():
-        legacy_fd = _open_dir(gamelist.parent)
+        legacy_fd = _open_shared_pygame_dir(gamelist.parent)
         try:
             data, info = _read_at(legacy_fd, gamelist.name)
             replacement = gamelist_bytes(data, "migration", remove=True, legacy_only=True)
