@@ -224,7 +224,15 @@ def test_service_rejects_ambiguous_native_pygame_entry(tmp_path: Path) -> None:
     assert "Modified Control Freak registration" in result.stderr
 
 
-def test_service_rejects_writable_native_pygame_directory(tmp_path: Path) -> None:
+def test_service_accepts_group_writable_native_pygame_directory(tmp_path: Path) -> None:
+    app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
+    (app.parents[2] / "roms/pygame").chmod(0o2775)
+
+    result = subprocess.run([script, "launch"], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_service_rejects_world_writable_native_pygame_directory(tmp_path: Path) -> None:
     app, _state, script = make_wrapper(tmp_path, "def main(): pass\n")
     (app.parents[2] / "roms/pygame").chmod(0o777)
 

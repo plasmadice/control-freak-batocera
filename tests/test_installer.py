@@ -863,16 +863,16 @@ def test_shared_gamelist_allows_batocera_roms_parent_mode(tmp_path: Path, source
     assert (pygame / "gamelist.xml").is_file()
 
 
-def test_shared_gamelist_refuses_writable_pygame_parent(tmp_path: Path, source_root: Path) -> None:
+def test_shared_gamelist_allows_platform_owned_pygame_parent(tmp_path: Path, source_root: Path) -> None:
     pygame = tmp_path / "roms/pygame"
     pygame.mkdir(parents=True)
-    pygame.chmod(0o755)
-    pygame.chmod(0o777)
+    pygame.chmod(0o2775)
 
-    with pytest.raises(RuntimeError, match="unsafe launcher trust boundary"):
-        install(tmp_path, source_root, "one", "stable")
+    install(tmp_path, source_root, "one", "stable")
+    install(tmp_path, source_root, "two", "stable")
 
-    assert not app(tmp_path).exists()
+    assert pygame.stat().st_mode & 0o7777 == 0o2775
+    assert (pygame / "gamelist.xml").is_file()
 
 
 def test_shared_gamelist_concurrent_write_is_not_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -12,8 +12,8 @@ from control_freak import __version__
 def test_project_and_runtime_versions_match_release() -> None:
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
 
-    assert project["project"]["version"] == "0.1.4"
-    assert __version__ == "0.1.4"
+    assert project["project"]["version"] == "0.1.5"
+    assert __version__ == "0.1.5"
 
 
 def release_source(tmp_path: Path) -> Path:

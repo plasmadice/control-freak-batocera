@@ -3,7 +3,7 @@
     {
       "mode": 420,
       "path": "control_freak/__init__.py",
-      "sha256": "69a7456a7fb17e0ecb124d002d87e1165a2f8f4f98f5dba0fe21d85813b9a957"
+      "sha256": "c4aa7e87942d67663ddb961e9fb3f940eaa05e90eb895bd611c8b072e6d08422"
     },
     {
       "mode": 420,
@@ -83,7 +83,7 @@
   ],
   "service": {
     "mode": 493,
-    "sha256": "d3a210026498df833ae05d71d1897acd43eb9d986a1aab32ee0250c7f4898803"
+    "sha256": "2fc6162c312bbfd757828d73e0feced9b1c0a107b04de5176c60ded4e8b0e49c"
   },
   "source": [
     {
@@ -124,7 +124,7 @@
     {
       "mode": 493,
       "path": "deploy/control_freak",
-      "sha256": "1c4d921698eb0a7beef2bf1bbb7768fda1fb25de90c26d64c677535f4735ffc5"
+      "sha256": "97a55ae009cccaa05a765e9e2e3355cb11e17710cfe1dd072000771a104ed118"
     },
     {
       "mode": 420,
@@ -134,7 +134,7 @@
     {
       "mode": 420,
       "path": "deploy/install_batocera.py",
-      "sha256": "7168e7fe7921557dcd6b7fc5421b64b4991a4dd6e4061584aed2e07b2b66227e"
+      "sha256": "72fad359cbaad3cfc90011fccfee2b597cfed796086266f23c070e9f60d8a177"
     },
     {
       "mode": 420,

@@ -1096,7 +1096,7 @@ def _replace_gamelist(pygame_fd: int, original: os.stat_result | None, original_
 
 def _pygame_gamelist_snapshot(root: Path) -> tuple[bytes | None, int]:
     _mkdirs_no_symlinks(root, LEGACY_APP_PARENT_REL)
-    pygame_fd = _open_owned_dir(root / LEGACY_APP_PARENT_REL)
+    pygame_fd = _open_dir(root / LEGACY_APP_PARENT_REL)
     try:
         data, mode, _ = _gamelist_state(pygame_fd)
         return data, mode
@@ -1105,7 +1105,7 @@ def _pygame_gamelist_snapshot(root: Path) -> tuple[bytes | None, int]:
 
 
 def _restore_pygame_gamelist(root: Path, expected: tuple[bytes | None, int], previous: tuple[bytes | None, int]) -> None:
-    pygame_fd = _open_owned_dir(root / LEGACY_APP_PARENT_REL)
+    pygame_fd = _open_dir(root / LEGACY_APP_PARENT_REL)
     try:
         current, mode, info = _gamelist_state(pygame_fd)
         if current != expected[0]:
@@ -1125,7 +1125,7 @@ def _sync_pygame_gamelist(root: Path, remove: bool = False) -> bool:
     if remove and not pygame.exists():
         return False
     _mkdirs_no_symlinks(root, LEGACY_APP_PARENT_REL)
-    pygame_fd = _open_owned_dir(pygame)
+    pygame_fd = _open_dir(pygame)
     try:
         data, mode, info = _gamelist_state(pygame_fd)
         if remove and data is None:
@@ -1901,7 +1901,7 @@ def _migrate_legacy_install(root: Path) -> None:
         return
     gamelist = root / LEGACY_APP_PARENT_REL / "gamelist.xml"
     if gamelist.exists() and not gamelist.is_symlink():
-        legacy_fd = _open_owned_dir(gamelist.parent)
+        legacy_fd = _open_dir(gamelist.parent)
         try:
             data, info = _read_at(legacy_fd, gamelist.name)
             replacement = gamelist_bytes(data, "migration", remove=True, legacy_only=True)
