@@ -20,13 +20,13 @@ The current release format requires Python 3.12 through 3.14, OpenSSL, `qrcode`,
 
 The Web app uses a persistent device-local self-signed HTTPS certificate. Browsers will warn until that certificate is explicitly trusted; HTTPS encrypts pairing and session credentials, but accepting an unverified certificate does not authenticate the device against an active first-use network attacker.
 
-The manifest-driven installer registers Control Freak in Batocera's built-in `pygame` EmulationStation system, beside titles such as RomM-o-Cera. Immutable releases live below root-owned `/userdata/system/control-freak/app/releases`; an atomic `current.json` selects the active release. The native Pygame gamelist points to a minimal launcher at `/userdata/system/control-freak/app/control-freak.pygame`, which delegates to the service wrapper. Nothing executable is installed below `/userdata/roms`.
+The manifest-driven installer registers Control Freak in Batocera's built-in `pygame` EmulationStation system when the shared filesystem supports atomic path exchange. Otherwise it uses a dedicated root-owned local EmulationStation system and leaves the shared Pygame gamelist untouched. Immutable releases live below root-owned `/userdata/system/control-freak/app/releases`; an atomic `current.json` selects the active release. Nothing executable is installed below `/userdata/roms`.
 
 ```bash
-python3 deploy/install_batocera.py --source . --release-id 0.1.6 --channel stable
+python3 deploy/install_batocera.py --source . --release-id 0.1.7 --channel stable
 ```
 
-The root-owned Pygame launcher invokes `/userdata/system/services/control_freak launch` while remaining outside `/userdata/roms`. The application, launcher, Control Freak library metadata, and service wrapper must be root-owned, non-symlinked, and not group/world writable. The platform-managed native Pygame gamelist may be platform-owned and group-writable, but must be a non-symlinked regular file that is not world-writable and whose Control Freak entry passes strict semantic validation. Cryptographic verification starts in the service wrapper, which verifies that registration and the signed runtime before executing it. The installer migrates the former `/userdata/roms/pygame/control-freak` and dedicated `controlfreak` layouts while preserving unrelated Pygame games and mutable play metadata.
+The root-owned launcher invokes `/userdata/system/services/control_freak launch` while remaining outside `/userdata/roms`. The application, launcher, Control Freak library metadata, registration strategy, and service wrapper must pass strict validation. The platform-managed native Pygame gamelist may be platform-owned and group-writable, but must be a non-symlinked regular file that is not world-writable. Cryptographic verification starts in the service wrapper, which validates the selected registration strategy and signed runtime before executing it. The installer migrates the former `/userdata/roms/pygame/control-freak` and dedicated `controlfreak` layouts while preserving unrelated Pygame games and mutable play metadata.
 
 ## Updates
 

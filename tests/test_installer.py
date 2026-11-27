@@ -1,6 +1,7 @@
 import json
 import hashlib
 import importlib.util
+import errno
 import os
 from pathlib import Path
 import runpy
@@ -122,6 +123,7 @@ def make_legacy_v3(root: Path) -> Path:
     manifest = json.loads(manifest_path.read_text())
     manifest["version"] = 3
     manifest.pop("registration")
+    manifest.pop("registration_strategy")
     manifest["static"][installer.LEGACY_LAUNCHER] = installer.checksum(launcher)
     manifest_path.write_bytes(installer._json_bytes(manifest))
     return launcher
@@ -609,7 +611,9 @@ def test_install_registers_versioned_custom_system_application(tmp_path: Path, s
 
     root = app(tmp_path)
     assert (root / "control-freak.pygame").is_file()
-    assert json.loads((root / installer.ROOT_MANIFEST).read_text())["version"] == 7
+    manifest = json.loads((root / installer.ROOT_MANIFEST).read_text())
+    assert manifest["version"] == 8
+    assert manifest["registration_strategy"] == "native"
     assert (root / "image.png").is_file()
     assert (root / "releases/0.1.0-test/control_freak/app.py").is_file()
     assert current(tmp_path) == {"channel": "stable", "release_id": "0.1.0-test", "version": 1}
@@ -618,12 +622,98 @@ def test_install_registers_versioned_custom_system_application(tmp_path: Path, s
     assert registered(tmp_path)
 
 
+def test_exchange_capability_probe_cleans_up_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pygame = tmp_path / installer.LEGACY_APP_PARENT_REL
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o775)
+
+    def unsupported(*_args: object) -> None:
+        raise OSError(errno.EINVAL, "unsupported")
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", unsupported)
+    assert installer._gamelist_exchange_supported(tmp_path) is False
+    assert list(pygame.iterdir()) == []
+
+    def denied(*_args: object) -> None:
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", denied)
+    with pytest.raises(OSError, match="denied"):
+        installer._gamelist_exchange_supported(tmp_path)
+    assert list(pygame.iterdir()) == []
+
+    exchanges = 0
+
+    def fails_after_success(*_args: object) -> None:
+        nonlocal exchanges
+        exchanges += 1
+        if exchanges == 2:
+            raise OSError(errno.EINVAL, "second exchange failed")
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", fails_after_success)
+    with pytest.raises(OSError, match="second exchange failed"):
+        installer._gamelist_exchange_supported(tmp_path)
+    assert list(pygame.iterdir()) == []
+
+
+def test_exchange_unsupported_uses_local_registration_without_touching_native(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pygame = tmp_path / installer.LEGACY_APP_PARENT_REL
+    pygame.mkdir(parents=True)
+    pygame.chmod(0o775)
+    gamelist = pygame / "gamelist.xml"
+    original = b"<gameList><game><path>./other.pygame</path><name>Other</name></game></gameList>\n"
+    gamelist.write_bytes(original)
+    gamelist.chmod(0o664)
+
+    def unsupported(*_args: object) -> None:
+        raise OSError(errno.EINVAL, "unsupported")
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", unsupported)
+    install(tmp_path, source_root, "one", "stable")
+    real_atomic_write = installer._atomic_write_at
+
+    def crash_activation(directory_fd: int, name: str, data: bytes, mode: int) -> None:
+        if name == installer.CURRENT and (app(tmp_path) / installer.ACTIVATION_JOURNAL).exists():
+            raise KeyboardInterrupt
+        real_atomic_write(directory_fd, name, data, mode)
+
+    monkeypatch.setattr(installer, "_atomic_write_at", crash_activation)
+    with pytest.raises(KeyboardInterrupt):
+        install(tmp_path, source_root, "two", "stable")
+    assert gamelist.read_bytes() == original
+    monkeypatch.setattr(installer, "_atomic_write_at", real_atomic_write)
+    install(tmp_path, source_root, "two", "stable")
+    manifest = json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())
+    assert manifest["registration_strategy"] == "local"
+    assert "<name>controlfreak</name>" in (tmp_path / installer.OVERLAY_REL).read_text()
+    assert gamelist.read_bytes() == original
+    service = tmp_path / installer.SERVICES_REL / installer.SERVICE_NAME
+    for name, value in {"F_ADD_SEALS": 1033, "F_SEAL_SEAL": 1, "F_SEAL_SHRINK": 2, "F_SEAL_GROW": 4, "F_SEAL_WRITE": 8}.items():
+        setattr(installer.fcntl, name, getattr(installer.fcntl, name, value))
+    _release, bundle_fd = runpy.run_path(str(service))["validated_release"]()
+    os.close(bundle_fd)
+
+    concurrent = b"platform bytes outside the local registration strategy\n"
+    gamelist.write_bytes(concurrent)
+    uninstall(tmp_path)
+    assert gamelist.read_bytes() == concurrent
+    assert not (tmp_path / installer.OVERLAY_REL).exists()
+    install(tmp_path, source_root, "three", "stable")
+    assert gamelist.read_bytes() == concurrent
+    assert not list(pygame.glob(".control-freak-exchange-*"))
+
+
 def test_upgrade_from_version_six_registers_native_pygame(tmp_path: Path, source_root: Path) -> None:
     install(tmp_path, source_root, "one", "stable")
     application = app(tmp_path)
     manifest_path = application / installer.ROOT_MANIFEST
     manifest = json.loads(manifest_path.read_text())
     manifest["version"] = 6
+    manifest.pop("registration_strategy")
     manifest["static"].pop("control-freak.pygame")
     (application / "control-freak.pygame").unlink()
     installer._sync_pygame_gamelist(tmp_path, remove=True)
@@ -632,10 +722,41 @@ def test_upgrade_from_version_six_registers_native_pygame(tmp_path: Path, source
     install(tmp_path, source_root, "two", "stable")
 
     upgraded = json.loads(manifest_path.read_text())
-    assert upgraded["version"] == 7
+    assert upgraded["version"] == 8
+    assert upgraded["registration_strategy"] == "native"
     assert (application / "control-freak.pygame").is_file()
     games = ET.parse(tmp_path / "roms/pygame/gamelist.xml").getroot().findall("game")
     assert [game.findtext("path") for game in games].count(installer.PYGAME_GAME_PATH) == 1
+
+
+def test_version_six_with_retained_release_migrates_to_local_without_cleaning_recovery_names(
+    tmp_path: Path, source_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install(tmp_path, source_root, "one", "stable")
+    install(tmp_path, source_root, "two", "stable")
+    application = app(tmp_path)
+    manifest_path = application / installer.ROOT_MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    installer._sync_pygame_gamelist(tmp_path, remove=True)
+    manifest["version"] = 6
+    manifest.pop("registration_strategy")
+    manifest["static"].pop("control-freak.pygame")
+    (application / "control-freak.pygame").unlink()
+    (application / installer.CURRENT).write_bytes(installer._json_bytes({"version": 1, "release_id": "one", "channel": "stable"}))
+    manifest_path.write_bytes(installer._json_bytes(manifest))
+    pygame = tmp_path / installer.LEGACY_APP_PARENT_REL
+    recoveries = [pygame / f".gamelist.xml.tmp-{number:024x}" for number in range(3)]
+    for number, path in enumerate(recoveries):
+        path.write_bytes(f"recovery-{number}".encode())
+
+    monkeypatch.setattr(installer, "_exchange_paths_at", lambda *_args: (_ for _ in ()).throw(OSError(errno.EINVAL, "unsupported")))
+    install(tmp_path, source_root, "three", "stable")
+
+    upgraded = json.loads(manifest_path.read_text())
+    assert upgraded["registration_strategy"] == "local"
+    assert upgraded["releases"] == ["one", "two", "three"]
+    assert current(tmp_path)["release_id"] == "three"
+    assert [path.read_bytes() for path in recoveries] == [b"recovery-0", b"recovery-1", b"recovery-2"]
 
 
 def test_install_uses_native_pygame_system_without_rom_executables(tmp_path: Path, source_root: Path) -> None:
@@ -722,7 +843,7 @@ def test_update_migrates_v3_from_legacy_rom_root(tmp_path: Path, source_root: Pa
 
     assert not launcher.exists()
     manifest = json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())
-    assert manifest["version"] == 7
+    assert manifest["version"] == 8
     assert installer.LEGACY_LAUNCHER in manifest["static"]
     assert current(tmp_path)["release_id"] == "two"
     assert manifest["releases"] == ["one", "two"]
@@ -1485,7 +1606,7 @@ def test_v3_migration_recovers_after_launcher_replace(tmp_path: Path, source_roo
 
     monkeypatch.setattr(installer, "_atomic_write_at", real)
     install(tmp_path, source_root, "two", "stable")
-    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 7
+    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 8
     assert not (app(tmp_path) / installer.LIFECYCLE_JOURNAL).exists()
 
 
@@ -1502,7 +1623,7 @@ def test_v3_migration_replaces_service_and_launcher(tmp_path: Path, source_root:
     install(tmp_path, source_root, "two", "stable")
     assert not launcher.exists()
     assert service.read_bytes() == installer._service_bytes(source_root, tmp_path)
-    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 7
+    assert json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())["version"] == 8
 
 
 def test_v5_rejects_modified_app_root_launcher(tmp_path: Path, source_root: Path) -> None:
@@ -1838,7 +1959,7 @@ def test_install_migrates_version_two_manifest_to_owned_service(tmp_path: Path, 
     install(tmp_path / "root", new_source, "two", "stable")
 
     migrated = json.loads((app(tmp_path / "root") / "install-manifest.json").read_text())
-    assert migrated["version"] == 7
+    assert migrated["version"] == 8
     assert (app(tmp_path / "root") / installer.LEGACY_LAUNCHER).is_file()
     assert migrated["service"]["name"] == "control_freak"
     assert (tmp_path / "root/system/services/control_freak").is_file()

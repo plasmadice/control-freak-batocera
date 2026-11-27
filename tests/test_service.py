@@ -112,7 +112,7 @@ def build_app(app: Path, release_id: str, web: str) -> None:
         ET.SubElement(game, key).text = value
     ET.indent(gamelist, space="\t")
     registration_bytes = {
-        "overlay": b"",
+        "overlay": b'<?xml version="1.0"?>\n<systemList/>\n',
         "marker": b"",
         "gamelist": b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(gamelist, encoding="utf-8") + b"\n",
         "image": b"",
