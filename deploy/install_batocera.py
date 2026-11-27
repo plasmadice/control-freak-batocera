@@ -1023,7 +1023,7 @@ def gamelist_bytes(data: bytes | None, release_id: str, remove: bool = False, *,
 def _gamelist_state(pygame_fd: int) -> tuple[bytes | None, int, os.stat_result | None]:
     try:
         data, info = _read_at(pygame_fd, "gamelist.xml")
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o002:
             raise RuntimeError("Refusing unsafe gamelist.xml")
         return data, info.st_mode & 0o777, info
     except FileNotFoundError:

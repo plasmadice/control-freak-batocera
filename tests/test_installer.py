@@ -835,10 +835,10 @@ def test_update_accepts_emulationstation_gamelist_play_metadata(tmp_path: Path, 
     assert native_games[1].findtext("playcount") == "3"
 
 
-def test_shared_gamelist_refuses_unsafe_mode_on_install(tmp_path: Path, source_root: Path) -> None:
+def test_shared_gamelist_refuses_world_writable_file_before_install(tmp_path: Path, source_root: Path) -> None:
     pygame = tmp_path / "roms/pygame"
     pygame.mkdir(parents=True)
-    pygame.chmod(0o755)
+    pygame.chmod(0o775)
     gamelist = pygame / "gamelist.xml"
     gamelist.write_bytes(b"<gameList><game><path>./other.pygame</path><name>Other</name></game></gameList>\n")
     gamelist.chmod(0o666)
@@ -863,16 +863,30 @@ def test_shared_gamelist_allows_batocera_roms_parent_mode(tmp_path: Path, source
     assert (pygame / "gamelist.xml").is_file()
 
 
-def test_shared_gamelist_allows_platform_owned_pygame_parent(tmp_path: Path, source_root: Path) -> None:
+def test_platform_owned_group_writable_gamelist_survives_full_lifecycle(
+    tmp_path: Path, source_root: Path,
+) -> None:
     pygame = tmp_path / "roms/pygame"
     pygame.mkdir(parents=True)
-    pygame.chmod(0o2775)
+    pygame.chmod(0o775)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList><game><path>./other.pygame</path><name>Other</name></game></gameList>\n")
+    gamelist.chmod(0o664)
 
     install(tmp_path, source_root, "one", "stable")
     install(tmp_path, source_root, "two", "stable")
+    uninstall(tmp_path)
 
-    assert pygame.stat().st_mode & 0o7777 == 0o2775
-    assert (pygame / "gamelist.xml").is_file()
+    assert pygame.stat().st_mode & 0o777 == 0o775
+    assert gamelist.stat().st_mode & 0o777 == 0o664
+    assert [game.findtext("name") for game in ET.parse(gamelist).getroot().findall("game")] == ["Other"]
+
+
+def test_gamelist_state_accepts_non_euid_platform_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = SimpleNamespace(st_mode=stat.S_IFREG | 0o664, st_uid=os.geteuid() + 1)
+    monkeypatch.setattr(installer, "_read_at", lambda *_args: (b"<gameList />", info))
+
+    assert installer._gamelist_state(1) == (b"<gameList />", 0o664, info)
 
 
 def test_shared_gamelist_concurrent_write_is_not_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
