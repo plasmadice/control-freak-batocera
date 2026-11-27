@@ -96,6 +96,7 @@ def build_app(app: Path, release_id: str, web: str) -> None:
         "marker": library / "Control Freak.controlfreak",
         "gamelist": library / "gamelist.xml",
         "image": library / "images/control-freak.png",
+        "launcher": userdata / "roms/pygame/control-freak-launcher/control-freak.pygame",
     }
     gamelist = ET.Element("gameList")
     game = ET.SubElement(gamelist, "game")
@@ -116,6 +117,7 @@ def build_app(app: Path, release_id: str, web: str) -> None:
         "marker": b"",
         "gamelist": b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(gamelist, encoding="utf-8") + b"\n",
         "image": b"",
+        "launcher": b"",
     }
     registration = {}
     for name, target in registration_paths.items():
@@ -124,11 +126,11 @@ def build_app(app: Path, release_id: str, web: str) -> None:
         target.chmod(0o644)
         registration[name] = {"sha256": hashlib.sha256(registration_bytes[name]).hexdigest(), "mode": 0o644}
     native = userdata / "roms/pygame/gamelist.xml"
-    native.parent.mkdir(parents=True)
+    native.parent.mkdir(parents=True, exist_ok=True)
     native.parent.chmod(0o755)
-    native.write_text("""<gameList><game><path>../../system/control-freak/app/control-freak.pygame</path><name>Control Freak</name><desc>Controller-first settings and management for Batocera.</desc><genre>Utility</genre><image>../../system/control-freak/app/image.png</image><developer>Haku</developer><publisher>Haku</publisher><players>1</players></game></gameList>\n""")
+    native.write_text("""<gameList><game><path>./control-freak-launcher/control-freak.pygame</path><name>Control Freak</name><desc>Controller-first settings and management for Batocera.</desc><genre>Utility</genre><image>../../system/control-freak/app/image.png</image><developer>Haku</developer><publisher>Haku</publisher><players>1</players></game></gameList>\n""")
     native.chmod(0o644)
-    (app / "install-manifest.json").write_text(json.dumps({"version": 7, "static": static, "service": {"name": "control_freak", "sha256": "0" * 64, "mode": 0o755}, "registration": registration, "releases": [release_id]}))
+    (app / "install-manifest.json").write_text(json.dumps({"version": 9, "static": static, "service": {"name": "control_freak", "sha256": "0" * 64, "mode": 0o755}, "registration": registration, "registration_strategy": "native", "releases": [release_id]}))
 
 
 def bind_wrapper(app: Path, script: Path) -> None:

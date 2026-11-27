@@ -29,10 +29,11 @@ APP_REL = Path("system/control-freak/app")
 APP_PARENT_REL = Path("system/control-freak")
 LEGACY_APP_REL = Path("roms/pygame/control-freak")
 LEGACY_APP_PARENT_REL = Path("roms/pygame")
+NATIVE_LAUNCHER_REL = Path("roms/pygame/control-freak-launcher/control-freak.pygame")
 LIBRARY_REL = Path("system/control-freak/library")
 OVERLAY_REL = Path("system/configs/emulationstation/es_systems_control_freak.cfg")
 GAME_PATH = "./Control Freak.controlfreak"
-PYGAME_GAME_PATH = "../../system/control-freak/app/control-freak.pygame"
+PYGAME_GAME_PATH = "./control-freak-launcher/control-freak.pygame"
 LEGACY_APP_GAME_PATH = "./control-freak/control-freak.pygame"
 LEGACY_GAME_PATH = "../../system/services/control_freak.pygame"
 RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
@@ -100,7 +101,7 @@ LOCAL_SYSTEMS_OVERLAY = """<?xml version="1.0"?>
 """
 LAUNCHER_CODE = 'import os\nos.execv("/userdata/system/services/control_freak", ["control_freak", "launch"])\n'
 MARKER_NAME = "Control Freak.controlfreak"
-REGISTRATION_MODES = {"overlay": 0o644, "marker": 0o644, "gamelist": 0o644, "image": 0o644}
+REGISTRATION_MODES = {"overlay": 0o644, "marker": 0o644, "gamelist": 0o644, "image": 0o644, "launcher": 0o644}
 RELEASE_PUBLIC_KEY = base64.b64decode(
     b"LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQm9qQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FZOEFNSUlCaWdLQ0FZRUEyTVEzMnp5bzRUU3hOeldrWXFSdwpYa1ZsbW1Hb2ltSWtFVWw2QjU4aVpCQ3M0Nk5OM0ltUTB1MEQweGNvNUhiRjVwMm5DKzlZWm5FeXB2YnhocVl1CnB5aUlqNE05YVJLZXJKT010c20vMGRsY3RpaGlyV0NCQWRwSTNUMFJEeTdFR3lwNDVRbDJkOWFBM3RqYmUyMGwKWUVIM1R2SXJnNXFPTmovSXFScjdjdGNLdW1TZTdLdFNwQXlFQUN6UjJ5cmhIeVZsMXlCOFJPWjJXMndSTW14bApMaEVnbDgzeXk3NU44SXI2bURNK1BLeTRtOHlWTHAwWjlabUVYYStHTnM2L0p1UTVRYVBWMWYwVXI3TU1hSC9kCnJEWEEvZ1YzQmx0RFNyUnlBeXpuTU9wdENCVitzVHBpMnBoZzhDS0EzMnZEMHYzZXlKRzg5UVdTS3NhU0FMVnAKdHdLN1V4eVV5YVlNcGsza3VmNVNWZFovMGRpbUFKZklzTWdQaTUxbk5oZFdwcW5xRWlJVXFtaVd5bTloK2tkTAp0MXQrYVpKNS9MUkVLUHB2a3hBd0Q0ZVJuelhvZTlmMmhuSlkvWXVoZkxUYTlHOGp1bGpISWkyRmREaFpQQmhDCkZTYklTZkNhb0dqeU0rdHBiK1Nodk1rNnNTcHpkdG9zR2QwYkNEY2Nkc3g1QWdNQkFBRT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg=="
 )
@@ -369,7 +370,7 @@ def _registration_strategy(root: Path, app: Path) -> str:
         manifest = _load_json_file(app / ROOT_MANIFEST, "install manifest")
         if not _valid_install_manifest(manifest):
             raise RuntimeError("Invalid install manifest")
-        if manifest["version"] == 8:
+        if manifest["version"] in {8, 9}:
             return manifest["registration_strategy"]
         if manifest["version"] == 7:
             if not _gamelist_exchange_supported(root):
@@ -592,14 +593,14 @@ def _valid_install_manifest(manifest: object) -> bool:
     service = manifest.get("service")
     releases = manifest.get("releases")
     version = manifest.get("version")
-    service_version = type(version) is int and version in {3, 4, 5, 6, 7, 8}
-    expected_static = STATIC_FILES if version in {7, 8} else V6_STATIC_FILES if version in {4, 6} else LEGACY_STATIC_FILES
+    service_version = type(version) is int and version in {3, 4, 5, 6, 7, 8, 9}
+    expected_static = STATIC_FILES if version in {7, 8, 9} else V6_STATIC_FILES if version in {4, 6} else LEGACY_STATIC_FILES
     registration = manifest.get("registration")
     strategy = manifest.get("registration_strategy")
-    expected_keys = {"version", "static", "service", "releases"} | ({"registration"} if version in {6, 7, 8} else set()) | ({"registration_strategy"} if version == 8 else set())
+    expected_keys = {"version", "static", "service", "releases"} | ({"registration"} if version in {6, 7, 8, 9} else set()) | ({"registration_strategy"} if version in {8, 9} else set())
     return not (
         type(version) is not int
-        or version not in {2, 3, 4, 5, 6, 7, 8}
+        or version not in {2, 3, 4, 5, 6, 7, 8, 9}
         or set(manifest) != (expected_keys if service_version else {"version", "static", "releases"})
         or not isinstance(static, dict)
         or set(static) != set(expected_static)
@@ -619,10 +620,10 @@ def _valid_install_manifest(manifest: object) -> bool:
                 or service["mode"] != SERVICE_MODE
             )
         )
-        or version == 8 and strategy not in {"native", "local"}
-        or version in {6, 7, 8} and (
+        or version in {8, 9} and strategy not in {"native", "local"}
+        or version in {6, 7, 8, 9} and (
             not isinstance(registration, dict)
-            or set(registration) != set(REGISTRATION_MODES)
+            or set(registration) != (set(REGISTRATION_MODES) if version == 9 and strategy == "native" else set(REGISTRATION_MODES) - {"launcher"})
             or any(
                 not isinstance(item, dict)
                 or set(item) != {"sha256", "mode"}
@@ -635,14 +636,17 @@ def _valid_install_manifest(manifest: object) -> bool:
     )
 
 
-def _registration_paths(root: Path) -> dict[str, Path]:
+def _registration_paths(root: Path, strategy: str = "native") -> dict[str, Path]:
     library = root / LIBRARY_REL
-    return {
+    paths = {
         "overlay": root / OVERLAY_REL,
         "marker": library / MARKER_NAME,
         "gamelist": library / "gamelist.xml",
         "image": library / "images/control-freak.png",
     }
+    if strategy == "native":
+        paths["launcher"] = root / NATIVE_LAUNCHER_REL
+    return paths
 
 
 def _library_gamelist() -> bytes:
@@ -663,22 +667,31 @@ def _library_gamelist() -> bytes:
     return b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="utf-8") + b"\n"
 
 
-def _registration_bytes(source: Path, strategy: str = "native") -> dict[str, bytes]:
+def _registration_bytes(root: Path, source: Path, strategy: str = "native") -> dict[str, bytes]:
     image = source / "assets/control-freak-image.png"
     if image.is_symlink() or not image.is_file():
         raise FileNotFoundError("release source is incomplete")
     overlay = SYSTEMS_OVERLAY if strategy == "native" else LOCAL_SYSTEMS_OVERLAY
-    return {"overlay": overlay.encode(), "marker": b"", "gamelist": _library_gamelist(), "image": image.read_bytes()}
+    data = {"overlay": overlay.encode(), "marker": b"", "gamelist": _library_gamelist(), "image": image.read_bytes()}
+    if strategy == "native":
+        launcher = (source / "deploy/control-freak.pygame").read_bytes()
+        if launcher != LAUNCHER_CODE.encode():
+            raise RuntimeError("Invalid Control Freak launcher")
+        data["launcher"] = launcher if root == Path("/userdata") else launcher.replace(b"/userdata", str(root).encode())
+    return data
 
 
 def _installed_registration_bytes(app: Path, strategy: str) -> dict[str, bytes]:
     overlay = SYSTEMS_OVERLAY if strategy == "native" else LOCAL_SYSTEMS_OVERLAY
-    return {"overlay": overlay.encode(), "marker": b"", "gamelist": _library_gamelist(), "image": (app / "image.png").read_bytes()}
+    data = {"overlay": overlay.encode(), "marker": b"", "gamelist": _library_gamelist(), "image": (app / "image.png").read_bytes()}
+    if strategy == "native":
+        data["launcher"] = (app / "control-freak.pygame").read_bytes()
+    return data
 
 
 def _preflight_registration(root: Path, data: dict[str, bytes]) -> list[str]:
     missing = []
-    for name, path in _registration_paths(root).items():
+    for name, path in _registration_paths(root, "native" if "launcher" in data else "local").items():
         try:
             info = path.lstat()
             if path.is_symlink():
@@ -715,7 +728,7 @@ def _gamelist_is_owned(path: Path) -> bool:
 
 
 def _validate_registration(root: Path, registration: dict, expected: dict[str, bytes] | None = None, *, allow_absent: bool = False) -> None:
-    for name, path in _registration_paths(root).items():
+    for name, path in _registration_paths(root, "native" if "launcher" in registration else "local").items():
         try:
             info = path.lstat()
             matches = (
@@ -737,7 +750,7 @@ def _validate_registration(root: Path, registration: dict, expected: dict[str, b
 
 
 def _ensure_registration(root: Path, source: Path, strategy: str) -> dict:
-    data = _registration_bytes(source, strategy)
+    data = _registration_bytes(root, source, strategy)
     desired = {
         name: {"sha256": hashlib.sha256(payload).hexdigest(), "mode": REGISTRATION_MODES[name]}
         for name, payload in data.items()
@@ -746,17 +759,20 @@ def _ensure_registration(root: Path, source: Path, strategy: str) -> dict:
     previous = None
     if (app / ROOT_MANIFEST).is_file() and not (app / ROOT_MANIFEST).is_symlink():
         manifest = _load_json_file(app / ROOT_MANIFEST, "install manifest")
-        if manifest.get("version") in {6, 7, 8} and isinstance(manifest.get("registration"), dict):
+        if manifest.get("version") in {6, 7, 8, 9} and isinstance(manifest.get("registration"), dict):
             previous = manifest["registration"]
             _validate_registration(root, previous)
             if previous["image"]["sha256"] != hashlib.sha256(data["image"]).hexdigest():
                 raise RuntimeError("Signed registration image differs from installed registration image")
-            return desired
-    paths = _registration_paths(root)
+            if set(previous) == set(desired):
+                return desired
+    paths = _registration_paths(root, strategy)
     missing = _preflight_registration(root, data)
     _prepare_owned_directory(root, OVERLAY_REL.parent)
     _prepare_owned_directory(root, LIBRARY_REL)
     _prepare_owned_directory(root, LIBRARY_REL / "images")
+    if strategy == "native":
+        _mkdirs_no_symlinks(root, NATIVE_LAUNCHER_REL.parent)
     created = []
     try:
         for name in missing:
@@ -780,19 +796,19 @@ def _ensure_registration(root: Path, source: Path, strategy: str) -> dict:
 
 
 def _update_registration(root: Path, before: dict, after: dict, data: dict[str, bytes]) -> None:
-    for name, path in _registration_paths(root).items():
+    for name, path in _registration_paths(root, "native" if "launcher" in after else "local").items():
         if after[name]["sha256"] != hashlib.sha256(data[name]).hexdigest():
             raise RuntimeError(f"Lifecycle protocol mismatch: {name}")
         info = path.lstat()
         digest = checksum(path)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o777 != after[name]["mode"]:
             raise RuntimeError(f"Modified registration file: {name}")
+        if digest == after[name]["sha256"]:
+            continue
         if name == "gamelist" and before[name]["sha256"] == after[name]["sha256"] and _gamelist_is_owned(path):
             continue
         if digest not in {before[name]["sha256"], after[name]["sha256"]}:
             raise RuntimeError(f"Modified registration file: {name}")
-        if digest == after[name]["sha256"]:
-            continue
         directory_fd = _open_dir(path.parent)
         try:
             _atomic_write_at(directory_fd, path.name, data[name], after[name]["mode"])
@@ -802,7 +818,7 @@ def _update_registration(root: Path, before: dict, after: dict, data: dict[str, 
 
 def _remove_registration(root: Path, registration: dict, *, allow_absent: bool = False) -> None:
     _validate_registration(root, registration, allow_absent=allow_absent)
-    for path in _registration_paths(root).values():
+    for path in _registration_paths(root, "native" if "launcher" in registration else "local").values():
         if not path.exists():
             continue
         directory_fd = _open_dir(path.parent)
@@ -811,7 +827,7 @@ def _remove_registration(root: Path, registration: dict, *, allow_absent: bool =
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
-    for directory in (root / LIBRARY_REL / "images", root / LIBRARY_REL):
+    for directory in (root / NATIVE_LAUNCHER_REL.parent, root / LIBRARY_REL / "images", root / LIBRARY_REL):
         try:
             directory.rmdir()
         except OSError:
@@ -833,7 +849,7 @@ def _load_install(
     service = manifest.get("service")
     releases = manifest["releases"]
     version = manifest["version"]
-    modes = STATIC_MODES if version in {7, 8} else V6_STATIC_MODES if version in {4, 6} else LEGACY_STATIC_MODES
+    modes = STATIC_MODES if version in {7, 8, 9} else V6_STATIC_MODES if version in {4, 6} else LEGACY_STATIC_MODES
     for name in static:
         target = app / name
         try:
@@ -862,12 +878,12 @@ def _load_install(
         service_absent = False
         service_hash = None
     service_record = service if isinstance(service, dict) else {}
-    allowed_service_hashes = {service_record["sha256"]} if version in {3, 4, 5, 6, 7, 8} else set()
+    allowed_service_hashes = {service_record["sha256"]} if version in {3, 4, 5, 6, 7, 8, 9} else set()
     if service_hash not in allowed_service_hashes and not (service_absent and (allow_missing_service or version == 2)):
         raise RuntimeError("Modified service file")
-    if expected_service is not None and (version not in {3, 4, 5, 6, 7, 8} or service_record["sha256"] != hashlib.sha256(expected_service).hexdigest()):
+    if expected_service is not None and (version not in {3, 4, 5, 6, 7, 8, 9} or service_record["sha256"] != hashlib.sha256(expected_service).hexdigest()):
         raise RuntimeError("Lifecycle protocol mismatch: service")
-    if version in {6, 7, 8}:
+    if version in {6, 7, 8, 9}:
         _validate_registration(app.parents[2], manifest["registration"], allow_absent=allow_missing_registration)
     current = _load_json_file(app / CURRENT, "current pointer")
     if (
@@ -941,7 +957,7 @@ def _recover_activation(root: Path, app: Path) -> None:
     app_fd = _open_dir(app)
     try:
         version = manifest["version"]
-        modes = STATIC_MODES if version in {7, 8} else V6_STATIC_MODES if version in {4, 6} else LEGACY_STATIC_MODES
+        modes = STATIC_MODES if version in {7, 8, 9} else V6_STATIC_MODES if version in {4, 6} else LEGACY_STATIC_MODES
         for name, mode in modes.items():
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=app_fd)
             try:
@@ -1793,9 +1809,10 @@ def _roll_forward_uninstall(root: Path, pygame_fd: int, services_fd: int) -> Non
             service_absent = True
         else:
             service_absent = False
+        strategy = intent["manifest"].get("registration_strategy", "native" if intent["manifest"]["version"] == 7 else "local")
         registration_absent = all(
             not path.exists() and not path.is_symlink()
-            for path in _registration_paths(root).values()
+            for path in _registration_paths(root, strategy).values()
         )
         if (app.exists() or app.is_symlink()) or not service_absent or not registration_absent:
             raise RuntimeError("Ambiguous uninstall quarantine")
@@ -1811,7 +1828,7 @@ def _roll_forward_uninstall(root: Path, pygame_fd: int, services_fd: int) -> Non
     manifest = intent["manifest"]
     replacement = (root / APP_REL).exists()
     if not replacement:
-        if manifest["version"] in {3, 4, 5, 6, 7, 8}:
+        if manifest["version"] in {3, 4, 5, 6, 7, 8, 9}:
             try:
                 service_data, service_info = _read_at(services_fd, SERVICE_NAME)
             except FileNotFoundError:
@@ -1824,7 +1841,7 @@ def _roll_forward_uninstall(root: Path, pygame_fd: int, services_fd: int) -> Non
         strategy = manifest.get("registration_strategy", "native" if manifest["version"] == 7 else "local")
         if strategy == "native":
             _sync_pygame_gamelist(root, remove=True)
-        if manifest["version"] in {6, 7, 8}:
+        if manifest["version"] in {6, 7, 8, 9}:
             _remove_registration(root, manifest["registration"], allow_absent=True)
     shutil.rmtree(Path(quarantine), dir_fd=pygame_fd)
     os.fsync(pygame_fd)
@@ -1892,7 +1909,7 @@ def _recover_lifecycle(app: Path, services_fd: int | None) -> None:
     _update_registration(app.parents[2], before.get("registration", registration), registration, _installed_registration_bytes(app, strategy))
     _validate_registration(app.parents[2], registration)
     recovered = {
-        "version": 8,
+        "version": 9,
         "static": static,
         "service": {"name": SERVICE_NAME, "sha256": service_hash, "mode": SERVICE_MODE},
         "registration": registration,
@@ -1913,7 +1930,7 @@ def _update_lifecycle(app: Path, services_fd: int, stable: dict[str, bytes], ser
     before, _ = _load_install(app, allow_missing_service=True)
     service_hash = hashlib.sha256(service_data).hexdigest()
     after = {
-        "version": 8,
+        "version": 9,
         "static": {name: hashlib.sha256(data).hexdigest() for name, data in stable.items()},
         "service": {"name": SERVICE_NAME, "sha256": service_hash, "mode": SERVICE_MODE},
         "registration": registration,
@@ -2044,13 +2061,13 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
         stable = _stable_bytes(required, app)
         if (app / ROOT_MANIFEST).is_file():
             installed = _load_json_file(app / ROOT_MANIFEST, "install manifest")
-            if installed.get("version") in {6, 7, 8} and isinstance(installed.get("registration"), dict):
+            if installed.get("version") in {6, 7, 8, 9} and isinstance(installed.get("registration"), dict):
                 if not (app / LIFECYCLE_JOURNAL).exists() and not (app / LIFECYCLE_JOURNAL).is_symlink():
                     _validate_registration(root, installed["registration"])
             else:
-                _preflight_registration(root, _registration_bytes(snapshot, strategy))
+                _preflight_registration(root, _registration_bytes(root, snapshot, strategy))
         else:
-            _preflight_registration(root, _registration_bytes(snapshot, strategy))
+            _preflight_registration(root, _registration_bytes(root, snapshot, strategy))
         try:
             existing_service, info = _read_at(services_fd, SERVICE_NAME)
             if existing_service != service_data or info.st_mode & 0o777 != SERVICE_MODE or info.st_uid != os.geteuid():
@@ -2089,7 +2106,7 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
                 os.chmod(destination, STATIC_MODES[name])
                 static[name] = checksum(destination)
             service_manifest = {"name": SERVICE_NAME, "sha256": hashlib.sha256(service_data).hexdigest(), "mode": SERVICE_MODE}
-            (application_staging / ROOT_MANIFEST).write_bytes(_json_bytes({"version": 8, "static": static, "service": service_manifest, "registration": registration, "registration_strategy": strategy, "releases": [release_id]}))
+            (application_staging / ROOT_MANIFEST).write_bytes(_json_bytes({"version": 9, "static": static, "service": service_manifest, "registration": registration, "registration_strategy": strategy, "releases": [release_id]}))
             (application_staging / CURRENT).write_bytes(_json_bytes({"version": 1, "release_id": release_id, "channel": channel}))
             _fsync_tree(application_staging)
             service_missing = False
@@ -2460,7 +2477,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
                         service_absent = False
                 registration_absent = all(
                     not path.exists() and not path.is_symlink()
-                    for path in _registration_paths(root).values()
+                    for path in _registration_paths(root, "local" if local_registration else "native").values()
                 )
                 if not service_absent or not registration_absent:
                     raise RuntimeError("Ambiguous uninstall quarantine")
@@ -2498,7 +2515,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
             _validate_uninstall_quarantine(target, uninstall_intent)
         service_info = None
         service_data = b""
-        if manifest["version"] in {3, 4, 5, 6, 7, 8}:
+        if manifest["version"] in {3, 4, 5, 6, 7, 8, 9}:
             try:
                 if services_fd is None:
                     raise FileNotFoundError
@@ -2530,7 +2547,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
             planned_quarantine = f".control-freak-remove-{secrets.token_hex(12)}"
             uninstall_intent = _uninstall_intent(root, planned_quarantine, manifest, target.stat())
         runtime_snapshot = None
-        if target == app and manifest["version"] in {3, 4, 5, 6, 7, 8}:
+        if target == app and manifest["version"] in {3, 4, 5, 6, 7, 8, 9}:
             assert current is not None
             try:
                 runtime_snapshot = _shutdown_runtime(root, current["release_id"], service_info is not None)
@@ -2579,7 +2596,7 @@ def uninstall(userdata: Path, dry_run: bool = False) -> list[str]:
             raise
         if runtime_snapshot is not None:
             _clear_shutdown_journal(root)
-        if manifest["version"] in {6, 7, 8}:
+        if manifest["version"] in {6, 7, 8, 9}:
             _remove_registration(root, manifest["registration"], allow_absent=True)
         shutil.rmtree(Path(target.name), dir_fd=pygame_fd, ignore_errors=True)
         if target.exists():

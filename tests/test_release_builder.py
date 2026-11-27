@@ -12,8 +12,8 @@ from control_freak import __version__
 def test_project_and_runtime_versions_match_release() -> None:
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
 
-    assert project["project"]["version"] == "0.1.7"
-    assert __version__ == "0.1.7"
+    assert project["project"]["version"] == "0.1.8"
+    assert __version__ == "0.1.8"
 
 
 def release_source(tmp_path: Path) -> Path:
@@ -48,12 +48,13 @@ def release_source(tmp_path: Path) -> Path:
 def test_release_builder_is_deterministic_and_emits_signable_canonical_metadata(tmp_path: Path) -> None:
     source = release_source(tmp_path)
 
-    first = build_release(source, tmp_path / "one", "1.2.3", "stable", ["43", "44"], 7, "Notes")
-    second = build_release(source, tmp_path / "two", "1.2.3", "stable", ["43", "44"], 7, "Notes")
+    first = build_release(source, tmp_path / "one", "1.2.3", "stable", ["43", "44"], 9, "Notes")
+    second = build_release(source, tmp_path / "two", "1.2.3", "stable", ["43", "44"], 9, "Notes")
 
     assert first[0].read_bytes() == second[0].read_bytes()
     assert first[1].read_bytes() == second[1].read_bytes()
     value = json.loads(first[1].read_text())
+    assert value["sequence"] == 9
     assert value["runtime"]["trust_sha256"]
     with zipfile.ZipFile(first[0]) as archive:
         assert set(archive.namelist()) == {item["path"] for item in value["files"]}
