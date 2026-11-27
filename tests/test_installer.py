@@ -1066,17 +1066,26 @@ def test_platform_owned_group_writable_gamelist_survives_full_lifecycle(
     gamelist = pygame / "gamelist.xml"
     gamelist.write_bytes(b"<gameList><game><path>./other.pygame</path><name>Other</name></game></gameList>\n")
     gamelist.chmod(0o664)
+    launcher = pygame / "control-freak-launcher"
+    launcher.mkdir()
+    launcher.chmod(0o777)
+    launcher_file = launcher / "control-freak.pygame"
+    launcher_file.write_bytes(b"unmanaged")
+    launcher_file.chmod(0o666)
 
     install(tmp_path, source_root, "one", "stable")
     manifest = json.loads((app(tmp_path) / installer.ROOT_MANIFEST).read_text())
     assert manifest["registration_strategy"] == "local"
-    assert not (tmp_path / installer.NATIVE_LAUNCHER_REL).exists()
+    assert launcher_file.read_bytes() == b"unmanaged"
     install(tmp_path, source_root, "two", "stable")
     uninstall(tmp_path)
 
     assert pygame.stat().st_mode & 0o777 == 0o775
     assert gamelist.stat().st_mode & 0o777 == 0o664
     assert [game.findtext("name") for game in ET.parse(gamelist).getroot().findall("game")] == ["Other"]
+    assert launcher.stat().st_mode & 0o777 == 0o777
+    assert launcher_file.stat().st_mode & 0o777 == 0o666
+    assert launcher_file.read_bytes() == b"unmanaged"
 
 
 def test_native_registration_rejects_unsafe_launcher_directory_before_snapshot(
@@ -1087,13 +1096,18 @@ def test_native_registration_rejects_unsafe_launcher_directory_before_snapshot(
     launcher.mkdir(parents=True)
     pygame.chmod(0o755)
     launcher.chmod(0o777)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList />\n")
     monkeypatch.setattr(installer, "_snapshot_source", lambda *_args: pytest.fail("source snapshot started"))
 
     with pytest.raises(RuntimeError, match="unsafe native launcher directory"):
         install(tmp_path, source_root, "one", "stable")
 
     assert launcher.stat().st_mode & 0o777 == 0o777
+    assert gamelist.read_bytes() == b"<gameList />\n"
     assert not app(tmp_path).exists()
+    assert not (tmp_path / "system/control-freak").exists()
+    assert not (tmp_path / installer.SERVICES_REL).exists()
 
 
 def test_native_registration_rejects_unsafe_launcher_file_before_snapshot(
@@ -1107,13 +1121,18 @@ def test_native_registration_rejects_unsafe_launcher_file_before_snapshot(
     launcher_file = launcher / "control-freak.pygame"
     launcher_file.write_bytes(b"unknown")
     launcher_file.chmod(0o666)
+    gamelist = pygame / "gamelist.xml"
+    gamelist.write_bytes(b"<gameList />\n")
     monkeypatch.setattr(installer, "_snapshot_source", lambda *_args: pytest.fail("source snapshot started"))
 
     with pytest.raises(RuntimeError, match="unsafe native launcher file"):
         install(tmp_path, source_root, "one", "stable")
 
     assert launcher_file.read_bytes() == b"unknown"
+    assert gamelist.read_bytes() == b"<gameList />\n"
     assert not app(tmp_path).exists()
+    assert not (tmp_path / "system/control-freak").exists()
+    assert not (tmp_path / installer.SERVICES_REL).exists()
 
 
 def test_native_registration_rechecks_swapped_pygame_directory(

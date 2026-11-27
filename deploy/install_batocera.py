@@ -430,7 +430,7 @@ def _native_registration_supported(root: Path, *, probe_exchange: bool = True) -
     return _gamelist_exchange_supported(root) if probe_exchange else True
 
 
-def _registration_strategy(root: Path, app: Path) -> str:
+def _registration_strategy(root: Path, app: Path, *, probe_exchange: bool = True) -> str:
     if (app / ROOT_MANIFEST).is_file() and not (app / ROOT_MANIFEST).is_symlink():
         manifest = _load_json_file(app / ROOT_MANIFEST, "install manifest")
         if not _valid_install_manifest(manifest):
@@ -441,12 +441,12 @@ def _registration_strategy(root: Path, app: Path) -> str:
                 raise RuntimeError("Native registration requires an owned non-writable pygame directory")
             return strategy
         if manifest["version"] == 7:
-            if not _native_registration_supported(root):
+            if not _native_registration_supported(root, probe_exchange=probe_exchange):
                 raise RuntimeError("Native registration requires atomic path exchange")
             return "native"
         if manifest["version"] == 6:
-            return "native" if _native_registration_supported(root) else "local"
-    return "native" if _native_registration_supported(root) else "local"
+            return "native" if _native_registration_supported(root, probe_exchange=probe_exchange) else "local"
+    return "native" if _native_registration_supported(root, probe_exchange=probe_exchange) else "local"
 
 
 def _fsync_tree(root: Path) -> None:
@@ -2155,6 +2155,7 @@ def install(userdata: Path, source: Path, release_id: str, channel: str, force: 
             _load_install(app, allow_missing_service=True)
         return operations
 
+    _registration_strategy(root, app, probe_exchange=False)
     _prepare_state_directory(root)
     services_fd = _prepare_owned_directory(root, SERVICES_REL)
     pygame_fd = _open_dir(root / APP_PARENT_REL)
